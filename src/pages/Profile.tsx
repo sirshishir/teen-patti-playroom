@@ -28,12 +28,28 @@ const Profile = () => {
     navigate('/lobby');
   };
 
+  const getProviderIcon = () => {
+    if (user.provider === 'facebook') {
+      return (
+        <div className="bg-blue-600 text-white rounded-full p-1 w-6 h-6 flex items-center justify-center">
+          <span className="text-lg font-bold">f</span>
+        </div>
+      );
+    } else {
+      return (
+        <div className="bg-red-500 text-white rounded-full p-1 w-6 h-6 flex items-center justify-center">
+          <span className="text-lg font-bold">G</span>
+        </div>
+      );
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-indigo-900 to-purple-900">
       <div className="container mx-auto px-4 py-8">
         <div className="max-w-2xl mx-auto bg-white rounded-lg shadow-xl overflow-hidden">
           <div className="bg-gradient-to-r from-purple-600 to-blue-600 px-6 py-12 text-white text-center">
-            <div className="w-24 h-24 rounded-full bg-white mx-auto mb-4 overflow-hidden">
+            <div className="w-32 h-32 rounded-full border-4 border-white mx-auto mb-4 overflow-hidden shadow-xl">
               <img 
                 src={user.photoURL} 
                 alt={user.name} 
@@ -41,7 +57,10 @@ const Profile = () => {
               />
             </div>
             <h1 className="text-3xl font-bold">{user.name}</h1>
-            <p className="text-blue-100">{user.email}</p>
+            <div className="flex items-center justify-center mt-2">
+              <p className="text-blue-100 mr-2">{user.email}</p>
+              {getProviderIcon()}
+            </div>
           </div>
           
           <div className="p-6">
@@ -55,6 +74,10 @@ const Profile = () => {
                 <div>
                   <p className="text-sm text-gray-500">Balance</p>
                   <p className="font-medium text-green-600">₹{user.balance}</p>
+                </div>
+                <div>
+                  <p className="text-sm text-gray-500">Login Provider</p>
+                  <p className="font-medium capitalize">{user.provider}</p>
                 </div>
               </div>
             </div>
