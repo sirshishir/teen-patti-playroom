@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/use-toast';
-import { Facebook } from 'lucide-react';
+import { Facebook, AlertTriangle } from 'lucide-react';
 
 /* Decorative card suits in background */
 const BackgroundSuits = () => (
@@ -40,7 +40,7 @@ const BackgroundSuits = () => (
 );
 
 const Login = () => {
-  const { login, loading } = useAuth();
+  const { login, loading, configured } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
@@ -108,12 +108,25 @@ const Login = () => {
           }}
         >
           <h2 className="text-white text-center text-xl font-bold mb-1">Sign In to Play</h2>
-          <p className="text-white/40 text-center text-sm mb-8">Join thousands of players at the table</p>
+          <p className="text-white/40 text-center text-sm mb-6">Join thousands of players at the table</p>
+
+          {/* Not-configured warning */}
+          {!configured && (
+            <div className="flex items-start gap-2 rounded-xl px-4 py-3 mb-6" style={{ background: 'rgba(234,179,8,0.1)', border: '1px solid rgba(234,179,8,0.3)' }}>
+              <AlertTriangle size={16} className="text-yellow-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-yellow-300 font-semibold text-xs">OAuth not configured</p>
+                <p className="text-yellow-400/70 text-xs mt-0.5">
+                  Follow <span className="font-mono font-bold">AUTH_SETUP.md</span> to connect real Facebook &amp; Google login. Login is disabled until Firebase env vars are set.
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Facebook Login — Primary CTA */}
           <button
             onClick={() => handleLogin('facebook')}
-            disabled={loading || loadingProvider !== null}
+            disabled={loading || loadingProvider !== null || !configured}
             className="w-full flex items-center justify-center gap-3 py-4 px-6 rounded-xl font-bold text-white text-base mb-4 transition-all duration-200 active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
             style={{
               background: 'linear-gradient(135deg, #1877f2 0%, #0e5fcd 100%)',
@@ -145,7 +158,7 @@ const Login = () => {
           {/* Google Login — Secondary */}
           <button
             onClick={() => handleLogin('google')}
-            disabled={loading || loadingProvider !== null}
+            disabled={loading || loadingProvider !== null || !configured}
             className="w-full flex items-center justify-center gap-3 py-3 px-6 rounded-xl font-semibold text-white/75 text-sm mb-7 transition-all duration-200 active:scale-95 disabled:opacity-60 hover:bg-white/10 disabled:cursor-not-allowed"
             style={{ background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.12)' }}
           >
