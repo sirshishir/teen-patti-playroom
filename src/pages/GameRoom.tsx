@@ -1,32 +1,18 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useGame } from '@/contexts/GameContext';
+import { useGame, GamePlayer, Card, evaluateHand } from '@/contexts/GameContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/use-toast';
 
-// ── Types ──────────────────────────────────────────────────────────────────
-type Card = { suit: 'hearts' | 'diamonds' | 'clubs' | 'spades'; value: number };
-type Phase = 'dealing' | 'playing' | 'showdown';
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-const SUIT_SYMBOL: Record<string, string> = { hearts: '♥', diamonds: '♦', clubs: '♣', spades: '♠' };
+// ─── Card helpers ────────────────────────────────────────────────────────────
+const SUIT_SYM: Record<string, string> = { hearts: '♥', diamonds: '♦', clubs: '♣', spades: '♠' };
 const IS_RED = (s: string) => s === 'hearts' || s === 'diamonds';
-const cardName = (v: number) =>
-  v === 1 ? 'A' : v === 11 ? 'J' : v === 12 ? 'Q' : v === 13 ? 'K' : String(v);
+const cardLabel = (v: number) => v === 1 ? 'A' : v === 11 ? 'J' : v === 12 ? 'Q' : v === 13 ? 'K' : String(v);
 
-// ── PlayingCard ─────────────────────────────────────────────────────────────
-interface CardProps {
-  card?: Card;
-  faceDown?: boolean;
-  delay?: number;
-  animate?: boolean;
-  small?: boolean;
-  direction?: 'down' | 'up';
-}
+// ─── PlayingCard ─────────────────────────────────────────────────────────────
+interface CardProps { card?: Card; faceDown?: boolean; delay?: number; animate?: boolean; size?: 'sm' | 'md' | 'lg'; }
 
-const PlayingCard: React.FC<CardProps> = ({
-  card, faceDown = false, delay = 0, animate = false, small = false, direction = 'down',
-}) => {
+const PlayingCard: React.FC<CardProps> = ({ card, faceDown = false, delay = 0, animate = false, size = 'md' }) => {
   const [visible, setVisible] = useState(false);
   const [flipped, setFlipped] = useState(false);
 
@@ -38,63 +24,38 @@ const PlayingCard: React.FC<CardProps> = ({
 
   useEffect(() => {
     if (visible && !faceDown) {
-      const t = setTimeout(() => setFlipped(true), 300);
+      const t = setTimeout(() => setFlipped(true), 350);
       return () => clearTimeout(t);
     }
     if (faceDown) setFlipped(false);
   }, [visible, faceDown]);
 
-  const W = small ? 36 : 60;
-  const H = small ? 52 : 88;
-  const dealClass = direction === 'down' ? 'card-deal-down' : 'card-deal-up';
+  const dims = size === 'lg' ? { w: 68, h: 96 } : size === 'sm' ? { w: 36, h: 52 } : { w: 52, h: 74 };
 
   return (
     <div
-      className={visible ? dealClass : ''}
-      style={{ width: W, height: H, flexShrink: 0, perspective: 800, opacity: visible ? undefined : 0 }}
+      className={`transition-all duration-500 ${visible ? 'card-deal-up opacity-100' : 'opacity-0 scale-75'}`}
+      style={{ width: dims.w, height: dims.h, flexShrink: 0, perspective: 800, animationDelay: `${delay}ms` }}
     >
-      <div
-        style={{
-          width: '100%', height: '100%',
-          transformStyle: 'preserve-3d',
-          transition: 'transform 0.45s ease',
-          transform: flipped ? 'rotateY(180deg)' : 'rotateY(0deg)',
-          position: 'relative',
-        }}
-      >
-        {/* ─ Card Back ─ */}
-        <div
-          className="absolute inset-0 rounded-lg shadow-2xl overflow-hidden"
-          style={{ backfaceVisibility: 'hidden', WebkitBackfaceVisibility: 'hidden' }}
-        >
-          <div className="w-full h-full flex items-center justify-center"
-            style={{ background: 'linear-gradient(135deg, #1a3a8f 0%, #0d2260 100%)', border: '2px solid rgba(255,255,255,0.15)', borderRadius: 8 }}
-          >
-            <div style={{
-              width: '82%', height: '82%',
-              border: '1px solid rgba(100,149,237,0.35)', borderRadius: 4,
-              backgroundImage: 'repeating-linear-gradient(45deg, rgba(255,255,255,0.03) 0px, rgba(255,255,255,0.03) 1px, transparent 1px, transparent 7px)',
-            }} />
+      <div style={{ width: '100%', height: '100%', transformStyle: 'preserve-3d', transition: 'transform 0.45s ease', transform: flipped ? 'rotateY(180deg)' : 'rotateY(0deg)', position: 'relative' }}>
+        {/* Back */}
+        <div className="absolute inset-0 rounded-lg shadow-2xl overflow-hidden" style={{ backfaceVisibility: 'hidden', WebkitBackfaceVisibility: 'hidden' }}>
+          <div className="w-full h-full flex items-center justify-center" style={{ background: 'linear-gradient(135deg,#1a3a8f,#0d2260)', border: '2px solid rgba(255,255,255,0.15)', borderRadius: 8 }}>
+            <div style={{ width: '82%', height: '82%', border: '1px solid rgba(100,149,237,0.35)', borderRadius: 4, backgroundImage: 'repeating-linear-gradient(45deg,rgba(255,255,255,0.03) 0px,rgba(255,255,255,0.03) 1px,transparent 1px,transparent 7px)' }} />
           </div>
         </div>
-
-        {/* ─ Card Front ─ */}
-        <div
-          className="absolute inset-0 rounded-lg shadow-2xl bg-white overflow-hidden"
-          style={{ backfaceVisibility: 'hidden', WebkitBackfaceVisibility: 'hidden', transform: 'rotateY(180deg)', border: '1px solid #e5e7eb' }}
-        >
+        {/* Front */}
+        <div className="absolute inset-0 rounded-lg shadow-2xl bg-white overflow-hidden" style={{ backfaceVisibility: 'hidden', WebkitBackfaceVisibility: 'hidden', transform: 'rotateY(180deg)', border: '1px solid #e5e7eb' }}>
           {card && (
-            <div className="w-full h-full flex flex-col" style={{ color: IS_RED(card.suit) ? '#dc2626' : '#111827', padding: small ? 3 : 5 }}>
+            <div className="w-full h-full flex flex-col" style={{ color: IS_RED(card.suit) ? '#dc2626' : '#111', padding: size === 'sm' ? 3 : 5 }}>
               <div style={{ lineHeight: 1 }}>
-                <div style={{ fontWeight: 800, fontSize: small ? 9 : 14 }}>{cardName(card.value)}</div>
-                <div style={{ fontSize: small ? 8 : 12 }}>{SUIT_SYMBOL[card.suit]}</div>
+                <div style={{ fontWeight: 800, fontSize: size === 'sm' ? 9 : size === 'lg' ? 15 : 12 }}>{cardLabel(card.value)}</div>
+                <div style={{ fontSize: size === 'sm' ? 8 : size === 'lg' ? 13 : 11 }}>{SUIT_SYM[card.suit]}</div>
               </div>
-              <div className="flex-1 flex items-center justify-center" style={{ fontSize: small ? 18 : 32 }}>
-                {SUIT_SYMBOL[card.suit]}
-              </div>
+              <div className="flex-1 flex items-center justify-center" style={{ fontSize: size === 'sm' ? 18 : size === 'lg' ? 36 : 28 }}>{SUIT_SYM[card.suit]}</div>
               <div style={{ lineHeight: 1, alignSelf: 'flex-end', transform: 'rotate(180deg)' }}>
-                <div style={{ fontWeight: 800, fontSize: small ? 9 : 14 }}>{cardName(card.value)}</div>
-                <div style={{ fontSize: small ? 8 : 12 }}>{SUIT_SYMBOL[card.suit]}</div>
+                <div style={{ fontWeight: 800, fontSize: size === 'sm' ? 9 : size === 'lg' ? 15 : 12 }}>{cardLabel(card.value)}</div>
+                <div style={{ fontSize: size === 'sm' ? 8 : size === 'lg' ? 13 : 11 }}>{SUIT_SYM[card.suit]}</div>
               </div>
             </div>
           )}
@@ -104,286 +65,410 @@ const PlayingCard: React.FC<CardProps> = ({
   );
 };
 
-// ── ChipBadge ──────────────────────────────────────────────────────────────
-const ChipBadge: React.FC<{ amount: number }> = ({ amount }) => (
-  <div className="flex items-center gap-1 rounded-full px-2 py-0.5"
-    style={{ background: 'rgba(0,0,0,0.55)', border: '1px solid rgba(212,175,55,0.4)' }}
-  >
+// ─── Chip badge ───────────────────────────────────────────────────────────────
+const Chip: React.FC<{ amount: number; className?: string }> = ({ amount, className = '' }) => (
+  <div className={`flex items-center gap-1 rounded-full px-2 py-0.5 ${className}`} style={{ background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(212,175,55,0.45)' }}>
     <div className="w-3 h-3 rounded-full bg-yellow-400 border border-yellow-600 flex-shrink-0" />
     <span className="text-yellow-300 font-bold" style={{ fontSize: 11 }}>₹{amount.toLocaleString()}</span>
   </div>
 );
 
-// ── Opponent Seat ──────────────────────────────────────────────────────────
-interface OpponentProps {
-  name: string; photoURL: string; balance: number; bet: number;
-  cards: Card[]; animate: boolean; dealOffset: number; isTurn: boolean; folded?: boolean;
+// ─── Status pill ──────────────────────────────────────────────────────────────
+const StatusPill: React.FC<{ status: string }> = ({ status }) => {
+  const cfg: Record<string, { label: string; color: string; bg: string }> = {
+    blind:  { label: 'BLIND',  color: '#93c5fd', bg: 'rgba(30,64,175,0.4)' },
+    seen:   { label: 'SEEN',   color: '#86efac', bg: 'rgba(22,101,52,0.4)' },
+    folded: { label: 'FOLDED', color: '#fca5a5', bg: 'rgba(153,27,27,0.4)' },
+    all_in: { label: 'ALL-IN', color: '#fde68a', bg: 'rgba(120,53,15,0.5)' },
+    waiting:{ label: 'WAIT',   color: '#d1d5db', bg: 'rgba(75,85,99,0.4)'  },
+  };
+  const c = cfg[status] || cfg.waiting;
+  return (
+    <span className="text-xs font-bold px-1.5 py-0.5 rounded-full" style={{ color: c.color, background: c.bg, fontSize: 9 }}>{c.label}</span>
+  );
+};
+
+// ─── Seat positions around oval ───────────────────────────────────────────────
+// Returns CSS position props for each seatIndex (0 = user/bottom-center)
+function seatPosition(seatIndex: number, total: number): React.CSSProperties {
+  // Predefined positions for up to 6 seats, laid out around the oval
+  const positions: React.CSSProperties[] = [
+    { bottom: '4%',  left: '50%',  transform: 'translateX(-50%)' }, // 0: user bottom
+    { bottom: '18%', right: '4%'  },                                  // 1: bottom-right
+    { top: '18%',    right: '4%'  },                                  // 2: top-right
+    { top: '4%',     left: '50%',  transform: 'translateX(-50%)' }, // 3: top-center
+    { top: '18%',    left: '4%'  },                                   // 4: top-left
+    { bottom: '18%', left: '4%'  },                                   // 5: bottom-left
+  ];
+  return { position: 'absolute', ...positions[seatIndex] };
 }
 
-const OpponentSeat: React.FC<OpponentProps> = ({ name, photoURL, balance, bet, cards, animate, dealOffset, isTurn, folded }) => (
-  <div className={`flex flex-col items-center gap-1 transition-opacity duration-500 ${folded ? 'opacity-30' : ''}`}>
-    <div className="flex gap-1">
-      {cards.map((_, i) => (
-        <PlayingCard key={i} faceDown animate={animate} delay={dealOffset + i * 400} small direction="down" />
-      ))}
-    </div>
-    <div
-      className={`flex flex-col items-center gap-1 rounded-xl px-3 py-2 ${isTurn ? 'turn-glow' : ''}`}
-      style={{
-        background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(8px)',
-        border: isTurn ? '1px solid rgba(250,204,21,0.7)' : '1px solid rgba(255,255,255,0.1)',
-      }}
-    >
-      <div className="relative rounded-full overflow-hidden"
-        style={{ width: 46, height: 46, border: isTurn ? '2px solid #facc15' : '2px solid rgba(255,255,255,0.25)' }}
+// ─── Player Seat ──────────────────────────────────────────────────────────────
+interface SeatProps {
+  player: GamePlayer;
+  isLocal: boolean;
+  animate: boolean;
+  dealBaseDelay: number;
+  showCards: boolean;
+}
+
+const PlayerSeatComponent: React.FC<SeatProps> = ({ player, isLocal, animate, dealBaseDelay, showCards }) => {
+  const folded = player.status === 'folded';
+  const isTurn = player.isTurn;
+  const handEval = isLocal && showCards && player.cards.length === 3 ? evaluateHand(player.cards) : null;
+
+  return (
+    <div className={`flex flex-col items-center gap-1 transition-opacity duration-500 ${folded ? 'opacity-30' : ''}`}>
+      {/* Cards */}
+      {player.cards.length > 0 && (
+        <div className="flex gap-1">
+          {player.cards.map((card, i) => (
+            <PlayingCard
+              key={i}
+              card={card}
+              faceDown={!isLocal || !showCards}
+              animate={animate}
+              delay={dealBaseDelay + i * 350}
+              size={isLocal ? 'lg' : 'sm'}
+            />
+          ))}
+        </div>
+      )}
+      {player.cards.length === 0 && !folded && (
+        <div className="flex gap-1">
+          {[0,1,2].map(i => (
+            <div key={i} className="rounded-lg bg-white/5 border border-white/10" style={{ width: isLocal ? 68 : 36, height: isLocal ? 96 : 52 }} />
+          ))}
+        </div>
+      )}
+
+      {/* Hand rank label for local player */}
+      {handEval && (
+        <div className="text-xs font-black tracking-wider px-2 py-0.5 rounded-full" style={{ background: 'rgba(212,175,55,0.2)', color: '#fbbf24', border: '1px solid rgba(212,175,55,0.4)', fontSize: 10 }}>
+          {handEval.label.toUpperCase()}
+        </div>
+      )}
+
+      {/* Seat info card */}
+      <div
+        className={`flex flex-col items-center gap-1 rounded-xl px-2 py-1.5 ${isTurn ? 'turn-glow' : ''}`}
+        style={{ background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(8px)', border: isTurn ? '1px solid rgba(250,204,21,0.8)' : '1px solid rgba(255,255,255,0.1)', minWidth: 72 }}
       >
-        <img src={photoURL} alt={name} className="w-full h-full object-cover" />
-        {isTurn && <div className="absolute inset-0 bg-yellow-300/10 animate-pulse" />}
+        <div className="relative rounded-full overflow-hidden" style={{ width: isLocal ? 46 : 38, height: isLocal ? 46 : 38, border: isTurn ? '2px solid #facc15' : `2px solid ${isLocal ? '#d4af37' : 'rgba(255,255,255,0.25)'}` }}>
+          <img src={player.photoURL} alt={player.name} className="w-full h-full object-cover" />
+          {isTurn && <div className="absolute inset-0 bg-yellow-300/15 animate-pulse" />}
+        </div>
+        <span className="text-white font-semibold truncate" style={{ fontSize: 11, maxWidth: 72 }}>{player.name}</span>
+        <Chip amount={player.balance} />
+        <div className="flex items-center gap-1">
+          <StatusPill status={player.status} />
+          {player.isDealer && <span className="w-4 h-4 rounded-full bg-white text-black flex items-center justify-center font-black" style={{ fontSize: 9 }}>D</span>}
+        </div>
+        {player.currentBet > 0 && (
+          <span className="text-yellow-300 font-semibold" style={{ fontSize: 10 }}>Bet ₹{player.currentBet}</span>
+        )}
       </div>
-      <span className="text-white font-semibold truncate" style={{ fontSize: 11, maxWidth: 68 }}>{name}</span>
-      <ChipBadge amount={balance} />
-      {bet > 0 && <span className="text-yellow-300 font-semibold" style={{ fontSize: 10 }}>Bet ₹{bet}</span>}
     </div>
-  </div>
-);
+  );
+};
 
-// ── Static opponent data ───────────────────────────────────────────────────
-const OPPONENTS = [
-  { id: 'o1', name: 'Rahul K.',  photoURL: 'https://ui-avatars.com/api/?name=Rahul+K&background=b91c1c&color=fff',  balance: 2500, bet: 50, isTurn: false, folded: false },
-  { id: 'o2', name: 'Priya S.',  photoURL: 'https://ui-avatars.com/api/?name=Priya+S&background=7c3aed&color=fff',  balance: 1200, bet: 50, isTurn: true,  folded: false },
-  { id: 'o3', name: 'Amit V.',   photoURL: 'https://ui-avatars.com/api/?name=Amit+V&background=065f46&color=fff',   balance: 800,  bet: 50, isTurn: false, folded: false },
-];
-
-const DUMMY_CARDS: Card[] = [{ suit: 'hearts', value: 1 }, { suit: 'clubs', value: 7 }, { suit: 'spades', value: 13 }];
-
-// ── GameRoom ───────────────────────────────────────────────────────────────
-const GameRoom = () => {
-  const { currentRoom, playerCards, leaveRoom, placeBet, fold, showCards } = useGame();
+// ─── GameRoom ─────────────────────────────────────────────────────────────────
+const GameRoom: React.FC = () => {
+  const { currentRoom, localPlayerId, localPlayer, isLocalPlayerTurn, callBet, raiseBet, foldHand, showCards: showCardsAction, seeCards, playBlind, startGame, leaveRoom } = useGame();
   const { user } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
 
-  const [betAmount, setBetAmount] = useState(currentRoom?.minBet || 10);
-  const [phase, setPhase] = useState<Phase>('dealing');
-  const [animate, setAnimate] = useState(false);
+  const [raiseAmount, setRaiseAmount] = useState(0);
   const [showLeave, setShowLeave] = useState(false);
-  const [userFaceDown, setUserFaceDown] = useState(true);
-
-  // Round-robin deal: 3 opponents + user = 4 seats, 3 cards each = 12 deliveries
-  // Seat i card j → delay = (j*4 + i) * 350ms
-  // User = seat 3: card j → (j*4 + 3) * 350
-  const DEAL_DONE_MS = (2 * 4 + 3) * 350 + 400 + 800; // last card delay + slide + buffer
+  const [cardsVisible, setCardsVisible] = useState(false);
+  const [localCardsRevealed, setLocalCardsRevealed] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
+  const prevPhase = useRef<string>('');
+  const animateRef = useRef(false);
 
   useEffect(() => {
     if (!currentRoom) { navigate('/lobby'); return; }
-    const t1 = setTimeout(() => setAnimate(true), 120);
-    const t2 = setTimeout(() => { setPhase('playing'); setUserFaceDown(false); }, DEAL_DONE_MS);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
+    setRaiseAmount(currentRoom.minBet * 2);
   }, []);
+
+  // Trigger deal animation when phase moves to dealing
+  useEffect(() => {
+    if (!currentRoom) return;
+    if (currentRoom.phase === 'dealing' && prevPhase.current !== 'dealing') {
+      animateRef.current = true;
+      setCardsVisible(true);
+      setLocalCardsRevealed(false);
+    }
+    if (currentRoom.phase === 'betting' && prevPhase.current === 'dealing') {
+      // Reveal local player cards after dealing
+      setTimeout(() => setLocalCardsRevealed(true), 600);
+    }
+    if (currentRoom.phase === 'waiting') {
+      setCardsVisible(false);
+      setLocalCardsRevealed(false);
+      animateRef.current = false;
+    }
+    prevPhase.current = currentRoom.phase;
+  }, [currentRoom?.phase]);
 
   if (!currentRoom) return null;
 
-  const isPlaying = phase === 'playing';
+  const phase = currentRoom.phase;
+  const players = currentRoom.players;
+  const isHost = players[0]?.id === localPlayerId;
 
-  const handleCall  = () => { placeBet(currentRoom.minBet); toast({ title: `Called ₹${currentRoom.minBet}` }); };
-  const handleRaise = () => { placeBet(betAmount); toast({ title: `Raised ₹${betAmount}` }); };
-  const handleFold  = () => { fold(); navigate('/lobby'); toast({ title: 'You folded.' }); };
-  const handleShow  = () => { showCards(); setPhase('showdown'); toast({ title: 'Cards shown!' }); };
+  const handleCopyCode = () => {
+    navigator.clipboard.writeText(currentRoom.code).catch(() => {});
+    setCodeCopied(true);
+    setTimeout(() => setCodeCopied(false), 2000);
+  };
+
+  const handleSee = () => { seeCards(); setLocalCardsRevealed(true); };
+  const handleFold = () => { foldHand(); toast({ title: 'You folded.' }); };
+  const handleCall = () => { callBet(); toast({ title: `Called ₹${currentRoom.currentBet}` }); };
+  const handleRaise = () => { raiseBet(raiseAmount); toast({ title: `Raised to ₹${raiseAmount}` }); };
+  const handleShow = () => { showCardsAction(); };
+
+  // Dealing delay: round-robin across seats
+  // seat i, card j → delay = (j * players.length + i) * 350ms
+  const getDealDelay = (seatIndex: number, cardIndex = 0) => (cardIndex * players.length + seatIndex) * 350;
 
   return (
-    <div
-      className="min-h-screen flex flex-col select-none"
-      style={{ background: 'radial-gradient(ellipse at 50% 30%, #1a0d3a 0%, #0a0618 70%, #000 100%)' }}
-    >
-      <div className="h-0.5 flex-shrink-0" style={{ background: 'linear-gradient(90deg, transparent, #d4af37, #f0d060, #d4af37, transparent)' }} />
+    <div className="min-h-screen flex flex-col select-none overflow-hidden" style={{ background: 'radial-gradient(ellipse at 50% 30%,#1a0d3a,#0a0618 65%,#000)' }}>
+      <div className="h-0.5 flex-shrink-0" style={{ background: 'linear-gradient(90deg,transparent,#d4af37,#f0d060,#d4af37,transparent)' }} />
 
       {/* ── Header ── */}
-      <header
-        className="flex items-center justify-between px-4 py-2.5 flex-shrink-0"
-        style={{ background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(10px)', borderBottom: '1px solid rgba(212,175,55,0.12)' }}
-      >
-        <div className="flex items-center gap-2">
-          <span className="gold-text font-black tracking-wider text-lg" style={{ fontFamily: 'Georgia, serif' }}>TEEN PATTI</span>
-          <span className="text-white/30 text-xs">|</span>
-          <span className="text-white/60 text-sm">{currentRoom.name}</span>
+      <header className="flex items-center justify-between px-4 py-2 flex-shrink-0" style={{ background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(10px)', borderBottom: '1px solid rgba(212,175,55,0.12)' }}>
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="gold-text font-black tracking-wider text-base hidden sm:block" style={{ fontFamily: 'Georgia,serif' }}>TEEN PATTI</span>
+          <span className="text-white/30 hidden sm:block">|</span>
+          <span className="text-white/70 text-sm font-semibold truncate">{currentRoom.name}</span>
         </div>
+
+        {/* Room code */}
+        <button onClick={handleCopyCode} className="flex items-center gap-1.5 px-3 py-1 rounded-lg transition-all" style={{ background: 'rgba(212,175,55,0.1)', border: '1px solid rgba(212,175,55,0.3)' }}>
+          <span className="text-yellow-400 font-black tracking-widest text-sm">{currentRoom.code}</span>
+          <span className="text-yellow-600 text-xs">{codeCopied ? '✓' : '📋'}</span>
+        </button>
+
         <div className="flex items-center gap-3">
-          <ChipBadge amount={user?.balance || 0} />
-          <button
-            onClick={() => setShowLeave(true)}
-            className="px-3 py-1.5 rounded-lg text-sm font-bold text-white/80 hover:text-white transition-colors"
-            style={{ background: 'rgba(185,28,28,0.3)', border: '1px solid rgba(185,28,28,0.4)' }}
-          >
+          <Chip amount={localPlayer?.balance ?? user?.balance ?? 0} />
+          <button onClick={() => setShowLeave(true)} className="px-3 py-1.5 rounded-lg text-sm font-bold text-white/80 hover:text-white transition-colors" style={{ background: 'rgba(185,28,28,0.3)', border: '1px solid rgba(185,28,28,0.4)' }}>
             Leave
           </button>
         </div>
       </header>
 
-      {/* ── Game area ── */}
-      <div className="flex-1 flex flex-col items-center justify-between py-4 px-3 gap-3 overflow-hidden">
+      {/* ── Main game area ── */}
+      <div className="flex-1 relative flex items-center justify-center overflow-hidden py-2">
+        {/* Seats container — positioned relative to center */}
+        <div className="relative" style={{ width: 'min(860px, 98vw)', height: 'min(520px, 92vh)' }}>
 
-        {/* Opponents */}
-        <div className="flex gap-4 sm:gap-8 justify-center items-end w-full max-w-2xl">
-          {OPPONENTS.map((opp, i) => (
-            <OpponentSeat
-              key={opp.id}
-              name={opp.name} photoURL={opp.photoURL} balance={opp.balance} bet={opp.bet}
-              cards={DUMMY_CARDS}
-              animate={animate}
-              dealOffset={i * 350}
-              isTurn={opp.isTurn} folded={opp.folded}
-            />
+          {/* Player seats */}
+          {players.map((player) => (
+            <div key={player.id} style={seatPosition(player.seatIndex, players.length)}>
+              <PlayerSeatComponent
+                player={player}
+                isLocal={player.id === localPlayerId}
+                animate={cardsVisible}
+                dealBaseDelay={getDealDelay(player.seatIndex)}
+                showCards={localCardsRevealed}
+              />
+            </div>
           ))}
-        </div>
 
-        {/* ── Oval Poker Table ── */}
-        <div
-          className="relative flex items-center justify-center flex-shrink-0 table-felt"
-          style={{
-            width: 'min(620px, 92vw)',
-            height: 'min(190px, 28vw)',
-            minHeight: 120,
-            borderRadius: '50%',
-            border: '18px solid #3d200a',
-            boxShadow: ['0 0 0 3px #7a4810', '0 0 0 5px #3d200a', 'inset 0 0 50px rgba(0,0,0,0.45)', '0 20px 60px rgba(0,0,0,0.7)'].join(', '),
-          }}
-        >
-          {/* Inner gold rail */}
-          <div className="absolute inset-2 rounded-[50%] pointer-events-none" style={{ border: '1px solid rgba(212,175,55,0.18)' }} />
+          {/* ── Oval poker table ── */}
+          <div
+            className="absolute table-felt"
+            style={{
+              width: 'min(560px,70vw)', height: 'min(200px,28vw)', minHeight: 130,
+              top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+              borderRadius: '50%',
+              border: '18px solid #4a2200',
+              boxShadow: '0 0 0 3px #7a4810,0 0 0 5px #3d1a00,inset 0 0 60px rgba(0,0,0,0.5),0 25px 70px rgba(0,0,0,0.8)',
+              zIndex: 0,
+            }}
+          >
+            {/* Gold inner rail */}
+            <div className="absolute inset-2 rounded-[50%] pointer-events-none" style={{ border: '1px solid rgba(212,175,55,0.2)' }} />
 
-          {/* Pot display */}
-          <div className="relative z-10 flex flex-col items-center gap-1">
-            <div className="flex items-center gap-2 rounded-full px-4 py-2 pot-pulse"
-              style={{ background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(212,175,55,0.4)', backdropFilter: 'blur(6px)' }}
-            >
-              <div className="flex">
-                {['#e53e3e', '#d4af37', '#3182ce'].map((c, i) => (
-                  <div key={i} className="w-5 h-5 rounded-full border-2" style={{ background: c, borderColor: c, marginLeft: i > 0 ? -7 : 0, zIndex: 3 - i }} />
+            {/* Table center content */}
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 z-10">
+              {/* Pot */}
+              <div className="flex items-center gap-2 rounded-full px-4 py-1.5 pot-pulse" style={{ background: 'rgba(0,0,0,0.65)', border: '1px solid rgba(212,175,55,0.45)', backdropFilter: 'blur(4px)' }}>
+                <div className="flex">
+                  {['#e53e3e','#d4af37','#3182ce'].map((c,i) => (
+                    <div key={i} className="w-5 h-5 rounded-full border-2" style={{ background: c, borderColor: c, marginLeft: i > 0 ? -7 : 0, zIndex: 3-i }} />
+                  ))}
+                </div>
+                <span className="text-yellow-300 font-bold text-sm">POT ₹{currentRoom.pot.toLocaleString()}</span>
+              </div>
+
+              {/* Game log */}
+              <div className="flex flex-col items-center gap-0.5 max-w-[200px]">
+                {currentRoom.log.slice(-2).map((entry, i) => (
+                  <span key={i} className="text-white/40 text-center" style={{ fontSize: 9 }}>{entry}</span>
                 ))}
               </div>
-              <span className="text-yellow-300 font-bold text-sm">POT ₹{currentRoom.pot.toLocaleString()}</span>
+
+              {/* Round */}
+              {phase === 'betting' && (
+                <span className="text-white/30" style={{ fontSize: 9 }}>Round {currentRoom.roundNumber} • Bet ₹{currentRoom.currentBet}</span>
+              )}
             </div>
-            <span className="text-white/30 text-xs">Min ₹{currentRoom.minBet}</span>
+
+            {/* Dealer button on table edge */}
+            <div className="absolute right-[10%] top-1/2 -translate-y-1/2 w-6 h-6 rounded-full flex items-center justify-center font-black" style={{ background: 'white', border: '2px solid #d4af37', color: '#111', fontSize: 10, boxShadow: '0 2px 8px rgba(0,0,0,0.5)' }}>D</div>
           </div>
 
-          {/* Dealer button */}
-          <div
-            className="absolute right-[13%] top-1/2 -translate-y-1/2 w-7 h-7 rounded-full flex items-center justify-center font-black text-xs"
-            style={{ background: 'white', border: '2px solid #d4af37', color: '#1a1a2e', boxShadow: '0 2px 8px rgba(0,0,0,0.5)' }}
-          >D</div>
-        </div>
-
-        {/* ── User area ── */}
-        <div className="flex flex-col items-center gap-3 w-full max-w-md">
-          {/* User cards — deal from below */}
-          <div className="flex gap-3 justify-center">
-            {playerCards.map((card, i) => (
-              <PlayingCard
-                key={i} card={card}
-                faceDown={userFaceDown}
-                animate={animate}
-                delay={(i * 4 + 3) * 350}
-                direction="up"
-              />
-            ))}
-          </div>
-
-          {/* User info */}
-          <div
-            className="flex items-center gap-3 rounded-xl px-4 py-2.5"
-            style={{ background: 'rgba(0,0,0,0.6)', border: '1px solid rgba(212,175,55,0.3)', backdropFilter: 'blur(8px)', boxShadow: '0 4px 20px rgba(0,0,0,0.4)' }}
-          >
-            <div className="rounded-full overflow-hidden flex-shrink-0" style={{ width: 44, height: 44, border: '2px solid #d4af37' }}>
-              <img src={user?.photoURL} alt={user?.name} className="w-full h-full object-cover" />
+          {/* Deck visual at center (shown during dealing) */}
+          {phase === 'dealing' && (
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 pointer-events-none" style={{ marginTop: -20 }}>
+              {[0,1,2,3,4].map(i => (
+                <div key={i} className="absolute rounded-lg" style={{ width: 42, height: 60, background: 'linear-gradient(135deg,#1a3a8f,#0d2260)', border: '1px solid rgba(255,255,255,0.2)', top: -i*1.5, left: -i*0.5, boxShadow: '0 4px 12px rgba(0,0,0,0.5)' }} />
+              ))}
             </div>
-            <div>
-              <p className="text-white font-bold text-sm">{user?.name}</p>
-              <ChipBadge amount={user?.balance || 0} />
-            </div>
-            <div className="ml-2 font-semibold" style={{ fontSize: 11, color: phase === 'playing' ? '#facc15' : 'rgba(255,255,255,0.4)' }}>
-              {phase === 'dealing' ? 'WAITING…' : phase === 'playing' ? 'YOUR TURN' : 'SHOWDOWN'}
-            </div>
-          </div>
+          )}
         </div>
       </div>
 
-      {/* ── Action bar ── */}
-      <div
-        className="flex-shrink-0 px-4 py-3"
-        style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(12px)', borderTop: '1px solid rgba(255,255,255,0.06)' }}
-      >
-        <div className="flex items-center justify-center gap-2 max-w-xl mx-auto flex-wrap">
-
-          <button onClick={handleFold} disabled={!isPlaying}
-            className="px-5 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
-            style={{ background: 'linear-gradient(135deg, #991b1b, #7f1d1d)', border: '1px solid rgba(239,68,68,0.4)', color: '#fca5a5', boxShadow: '0 4px 12px rgba(153,27,27,0.4)' }}
-          >FOLD</button>
-
-          <button onClick={handleCall} disabled={!isPlaying}
-            className="px-5 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
-            style={{ background: 'linear-gradient(135deg, #1e40af, #1e3a8a)', border: '1px solid rgba(59,130,246,0.4)', color: '#93c5fd', boxShadow: '0 4px 12px rgba(30,64,175,0.4)' }}
-          >CALL ₹{currentRoom.minBet}</button>
-
-          {/* Bet size control */}
-          <div className="flex items-center rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.05)' }}>
-            <button
-              onClick={() => setBetAmount(v => Math.max(currentRoom.minBet, v - currentRoom.minBet))}
-              disabled={!isPlaying}
-              className="px-3 py-2.5 text-white/60 hover:text-yellow-400 font-black text-sm transition-colors disabled:opacity-30"
-            >−</button>
-            <span className="text-white font-bold text-sm min-w-[60px] text-center">₹{betAmount}</span>
-            <button
-              onClick={() => setBetAmount(v => v + currentRoom.minBet)}
-              disabled={!isPlaying}
-              className="px-3 py-2.5 text-white/60 hover:text-yellow-400 font-black text-sm transition-colors disabled:opacity-30"
-            >+</button>
+      {/* ── Round over overlay ── */}
+      {phase === 'round_over' && currentRoom.winner && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center pointer-events-none" style={{ background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' }}>
+          <div className="flex flex-col items-center gap-4 px-10 py-8 rounded-2xl scale-in" style={{ background: 'linear-gradient(135deg,#1a0d3a,#100820)', border: '1px solid rgba(212,175,55,0.4)', boxShadow: '0 0 60px rgba(212,175,55,0.2)' }}>
+            <div className="text-yellow-400 font-black text-2xl tracking-wider">🏆 WINNER!</div>
+            <div className="flex items-center gap-3">
+              <img src={currentRoom.winner.photoURL} alt={currentRoom.winner.name} className="w-14 h-14 rounded-full border-2 border-yellow-400" />
+              <div>
+                <p className="text-white font-bold text-lg">{currentRoom.winner.name}</p>
+                <p className="text-yellow-400 font-semibold">{currentRoom.winnerHand?.label}</p>
+                <p className="text-green-400 font-bold">+₹{currentRoom.pot.toLocaleString()}</p>
+              </div>
+            </div>
+            <p className="text-white/40 text-sm">Next round starting soon…</p>
           </div>
-
-          <button onClick={handleRaise} disabled={!isPlaying}
-            className="px-5 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
-            style={{ background: 'linear-gradient(135deg, #d4af37, #b8860b)', border: '1px solid rgba(212,175,55,0.5)', color: '#000', boxShadow: '0 4px 16px rgba(212,175,55,0.35)' }}
-          >RAISE ₹{betAmount}</button>
-
-          <button onClick={handleShow} disabled={!isPlaying}
-            className="px-5 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed"
-            style={{ background: 'linear-gradient(135deg, #065f46, #064e3b)', border: '1px solid rgba(52,211,153,0.35)', color: '#6ee7b7', boxShadow: '0 4px 12px rgba(6,95,70,0.4)' }}
-          >SHOW</button>
         </div>
-      </div>
+      )}
 
       {/* ── Dealing overlay ── */}
       {phase === 'dealing' && (
-        <div className="fixed inset-0 pointer-events-none flex items-center justify-center z-20">
-          <div className="flex flex-col items-center gap-3 px-8 py-5 rounded-2xl scale-in"
-            style={{ background: 'rgba(0,0,0,0.82)', border: '1px solid rgba(212,175,55,0.35)', backdropFilter: 'blur(8px)' }}
-          >
-            <span className="text-yellow-400 font-black text-xl tracking-wider">Dealing Cards</span>
+        <div className="fixed inset-0 pointer-events-none flex items-center justify-center z-30" style={{ top: '30%' }}>
+          <div className="flex flex-col items-center gap-2 px-6 py-3 rounded-xl" style={{ background: 'rgba(0,0,0,0.75)', border: '1px solid rgba(212,175,55,0.3)', backdropFilter: 'blur(6px)' }}>
+            <span className="text-yellow-400 font-black tracking-wider">Dealing Cards</span>
             <div className="flex gap-1.5">
-              {[0, 1, 2].map(i => (
-                <div key={i} className="w-2.5 h-2.5 rounded-full bg-yellow-400 dealing-dot" style={{ animationDelay: `${i * 0.2}s` }} />
-              ))}
+              {[0,1,2].map(i => <div key={i} className="w-2 h-2 rounded-full bg-yellow-400 dealing-dot" style={{ animationDelay: `${i*0.2}s` }} />)}
             </div>
           </div>
         </div>
       )}
 
-      {/* ── Leave confirmation ── */}
+      {/* ── Action bar ── */}
+      <div className="flex-shrink-0 px-4 py-3" style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(12px)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+        <div className="max-w-2xl mx-auto">
+
+          {/* WAITING phase */}
+          {phase === 'waiting' && (
+            <div className="flex flex-col items-center gap-3">
+              <div className="flex items-center gap-2 text-white/50 text-sm">
+                <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
+                <span>Waiting for players… Share code <span className="text-yellow-400 font-black tracking-widest">{currentRoom.code}</span></span>
+              </div>
+              {isHost && (
+                <button onClick={startGame} disabled={players.filter(p => !p.isBot).length < 1}
+                  className="px-8 py-3 rounded-xl font-black text-black text-base transition-all active:scale-95"
+                  style={{ background: 'linear-gradient(135deg,#d4af37,#f0c030)', boxShadow: '0 4px 20px rgba(212,175,55,0.4)' }}
+                >
+                  START GAME
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* DEALING phase */}
+          {phase === 'dealing' && (
+            <div className="flex justify-center">
+              <span className="text-white/40 text-sm">Cards are being dealt…</span>
+            </div>
+          )}
+
+          {/* BETTING phase */}
+          {phase === 'betting' && (
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              {!isLocalPlayerTurn ? (
+                <div className="flex items-center gap-2 text-white/50">
+                  <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                  <span className="text-sm">Waiting for {players.find(p => p.isTurn)?.name ?? 'player'}…</span>
+                </div>
+              ) : (
+                <>
+                  <button onClick={handleFold} className="px-4 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95"
+                    style={{ background: 'linear-gradient(135deg,#991b1b,#7f1d1d)', border: '1px solid rgba(239,68,68,0.4)', color: '#fca5a5', boxShadow: '0 4px 12px rgba(153,27,27,0.4)' }}>
+                    FOLD
+                  </button>
+
+                  {localPlayer?.status === 'blind' && (
+                    <button onClick={handleSee} className="px-4 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95"
+                      style={{ background: 'linear-gradient(135deg,#1e40af,#1e3a8a)', border: '1px solid rgba(59,130,246,0.4)', color: '#93c5fd', boxShadow: '0 4px 12px rgba(30,64,175,0.4)' }}>
+                      SEE CARDS
+                    </button>
+                  )}
+
+                  {localPlayer?.status === 'blind' && (
+                    <button onClick={playBlind} className="px-4 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95"
+                      style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.7)' }}>
+                      PLAY BLIND ₹{currentRoom.currentBet}
+                    </button>
+                  )}
+
+                  {localPlayer?.status === 'seen' && (
+                    <button onClick={handleCall} className="px-4 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95"
+                      style={{ background: 'linear-gradient(135deg,#1e40af,#1e3a8a)', border: '1px solid rgba(59,130,246,0.4)', color: '#93c5fd', boxShadow: '0 4px 12px rgba(30,64,175,0.4)' }}>
+                      CALL ₹{currentRoom.currentBet * 2}
+                    </button>
+                  )}
+
+                  {/* Raise control */}
+                  <div className="flex items-center gap-1 rounded-xl overflow-hidden" style={{ border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.05)' }}>
+                    <button onClick={() => setRaiseAmount(v => Math.max(currentRoom.currentBet * 2, v - currentRoom.minBet))} className="px-3 py-2.5 text-white/60 hover:text-yellow-400 font-black text-sm transition-colors">−</button>
+                    <span className="text-white font-bold text-sm min-w-[60px] text-center">₹{raiseAmount}</span>
+                    <button onClick={() => setRaiseAmount(v => Math.min(localPlayer?.balance ?? v, v + currentRoom.minBet))} className="px-3 py-2.5 text-white/60 hover:text-yellow-400 font-black text-sm transition-colors">+</button>
+                  </div>
+
+                  <button onClick={handleRaise} className="px-4 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95"
+                    style={{ background: 'linear-gradient(135deg,#d4af37,#b8860b)', border: '1px solid rgba(212,175,55,0.5)', color: '#000', boxShadow: '0 4px 16px rgba(212,175,55,0.35)' }}>
+                    RAISE ₹{raiseAmount}
+                  </button>
+
+                  {localPlayer?.status === 'seen' && (
+                    <button onClick={handleShow} className="px-4 py-2.5 rounded-xl font-black text-sm transition-all active:scale-95"
+                      style={{ background: 'linear-gradient(135deg,#065f46,#064e3b)', border: '1px solid rgba(52,211,153,0.35)', color: '#6ee7b7', boxShadow: '0 4px 12px rgba(6,95,70,0.4)' }}>
+                      SHOW
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {/* ROUND OVER / SHOWDOWN */}
+          {(phase === 'round_over' || phase === 'showdown') && (
+            <div className="flex justify-center">
+              <span className="text-yellow-400/60 text-sm font-semibold">Next round starting automatically…</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Leave confirm ── */}
       {showLeave && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(4px)' }}>
-          <div className="w-full max-w-sm rounded-2xl p-6 scale-in"
-            style={{ background: 'linear-gradient(135deg, #1a0d3a 0%, #100820 100%)', border: '1px solid rgba(212,175,55,0.3)', boxShadow: '0 30px 80px rgba(0,0,0,0.7)' }}
-          >
+          <div className="w-full max-w-sm rounded-2xl p-6 scale-in" style={{ background: 'linear-gradient(135deg,#1a0d3a,#100820)', border: '1px solid rgba(212,175,55,0.3)', boxShadow: '0 30px 80px rgba(0,0,0,0.7)' }}>
             <h3 className="text-white text-lg font-bold mb-2">Leave the Table?</h3>
-            <p className="text-white/50 text-sm mb-6">Your current bet will be lost.</p>
+            <p className="text-white/50 text-sm mb-6">Your current bet will be forfeited.</p>
             <div className="flex gap-3">
-              <button onClick={() => setShowLeave(false)}
-                className="flex-1 py-3 rounded-xl text-white/60 hover:text-white font-semibold transition-colors"
-                style={{ border: '1px solid rgba(255,255,255,0.1)' }}
-              >Stay</button>
-              <button onClick={() => { leaveRoom(); navigate('/lobby'); }}
-                className="flex-1 py-3 rounded-xl font-bold text-white transition-all active:scale-95"
-                style={{ background: 'linear-gradient(135deg, #991b1b, #7f1d1d)', border: '1px solid rgba(239,68,68,0.3)' }}
-              >Leave</button>
+              <button onClick={() => setShowLeave(false)} className="flex-1 py-3 rounded-xl text-white/60 hover:text-white font-semibold transition-colors" style={{ border: '1px solid rgba(255,255,255,0.1)' }}>Stay</button>
+              <button onClick={() => { leaveRoom(); navigate('/lobby'); }} className="flex-1 py-3 rounded-xl font-bold text-white transition-all active:scale-95" style={{ background: 'linear-gradient(135deg,#991b1b,#7f1d1d)', border: '1px solid rgba(239,68,68,0.3)' }}>Leave</button>
             </div>
           </div>
         </div>
