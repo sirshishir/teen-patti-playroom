@@ -25,6 +25,7 @@ type AuthContextType = {
   loading: boolean;
   configured: boolean;
   login: (provider: 'google' | 'facebook') => Promise<void>;
+  loginAsGuest: () => void; // DEV BYPASS — remove button in Login.tsx to disable
   logout: () => Promise<void>;
 };
 
@@ -98,6 +99,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  // DEV BYPASS — creates a local guest session without Firebase
+  // To disable: remove the "Skip Login" button from src/pages/Login.tsx
+  const loginAsGuest = () => {
+    const guest: User = {
+      id: `guest_${Math.random().toString(36).substr(2, 8)}`,
+      name: 'Guest Player',
+      email: 'guest@demo.local',
+      photoURL: 'https://ui-avatars.com/api/?name=Guest+Player&background=d4af37&color=000',
+      balance: 5000,
+      provider: 'google',
+    };
+    setUser(guest);
+  };
+
   const logout = async () => {
     if (!auth) return;
     setLoading(true);
@@ -110,7 +125,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, configured: isFirebaseConfigured, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, configured: isFirebaseConfigured, login, loginAsGuest, logout }}>
       {children}
     </AuthContext.Provider>
   );

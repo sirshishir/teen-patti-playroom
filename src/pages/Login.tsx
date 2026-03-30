@@ -40,7 +40,7 @@ const BackgroundSuits = () => (
 );
 
 const Login = () => {
-  const { login, loading, configured } = useAuth();
+  const { login, loginAsGuest, loading, configured } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
@@ -178,6 +178,15 @@ const Login = () => {
                 <span>Continue with Google</span>
               </>
             )}
+          </button>
+
+          {/* DEV BYPASS — delete this button block when real OAuth is live */}
+          <button
+            onClick={() => { loginAsGuest(); navigate(from, { replace: true }); }}
+            className="w-full py-2.5 rounded-xl text-xs font-semibold mb-5 transition-all active:scale-95"
+            style={{ background: 'rgba(255,255,255,0.04)', border: '1px dashed rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.35)' }}
+          >
+            ⚡ Skip Login — Demo Mode
           </button>
 
           <p className="text-center text-white/25 text-xs leading-relaxed">
