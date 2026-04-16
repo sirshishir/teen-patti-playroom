@@ -1,0 +1,38 @@
+trading:
+  mode: paper                    # 'paper' or 'live' — overridden by .env
+  capital: 2000
+  max_position_size: 200
+  max_open_positions: 3
+  max_daily_loss: 300
+
+strategy:
+  rsi_oversold: 35
+  rsi_overbought: 65
+  volume_ratio_min: 1.5
+  vix_max: 30
+  min_dte: 14
+  max_dte: 30
+  ai_confidence_min: 0.72
+  take_profit_pct: 0.40
+  stop_loss_pct: 0.25
+  trail_trigger_pct: 0.20
+  trail_stop_pct: 0.10
+  sr_zone_tolerance: 0.003
+  earnings_buffer_days: 5
+
+ml:
+  cold_start_trades: 50
+  retrain_day: sunday
+  min_trades_for_learning: 20
+  model_path: models/confidence_model.pkl
+
+watchlist:
+  - GOOGL
+  - MSFT
+  - TSLA
+  - AAPL
+  - SPY
+
+notifications:
+  daily_report_time: "16:15"
+  timezone: US/Eastern
