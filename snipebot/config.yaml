@@ -6,24 +6,34 @@ trading:
   max_daily_loss: 300
 
 strategy:
-  rsi_oversold: 35
-  rsi_overbought: 65
-  volume_ratio_min: 1.5
-  vix_max: 30
-  min_dte: 14
-  max_dte: 30
-  ai_confidence_min: 0.72
-  take_profit_pct: 0.40
-  stop_loss_pct: 0.25
-  trail_trigger_pct: 0.20
-  trail_stop_pct: 0.10
-  sr_zone_tolerance: 0.003
-  earnings_buffer_days: 5
+  # ── SMC Entry Filters ──────────────────────────────────────────────────────
+  fib_zone_min: 0.618            # Lower Fibonacci retracement bound for entry
+  fib_zone_max: 0.786            # Upper Fibonacci retracement bound for entry
+  rvol_min: 1.5                  # Minimum relative volume (current / 20-bar avg)
+  atr_expansion_min: 1.1         # Min fast-ATR / slow-ATR ratio (volatility expansion)
+  session_score_min: 1           # Minimum session score (0=low, 1=medium, 2=high)
+  ob_tolerance: 0.003            # Order block proximity tolerance (±0.3%)
+  liquidity_zone_tolerance: 0.002 # Equal high/low detection tolerance (±0.2%)
+  swing_lookback: 50             # Bars used for Fibonacci swing detection
+  struct_swing_order: 3          # argrelextrema neighbourhood for swing points
+
+  # ── Universal Filters (unchanged) ─────────────────────────────────────────
+  vix_max: 30                    # Skip when VIX >= this value
+  min_dte: 14                    # Minimum days to expiration
+  max_dte: 30                    # Maximum days to expiration
+  ai_confidence_min: 0.72        # AI model minimum confidence to fire
+  earnings_buffer_days: 5        # Skip if earnings within this many days
+
+  # ── Exit Parameters ────────────────────────────────────────────────────────
+  take_profit_pct: 0.40          # +40% on option premium
+  stop_loss_pct: 0.25            # −25% on option premium
+  trail_trigger_pct: 0.20        # Start trailing once +20% reached
+  trail_stop_pct: 0.10           # Trail stops −10% from peak
 
 ml:
-  cold_start_trades: 50
+  cold_start_trades: 50          # Use rule-based scorer until this many trades logged
   retrain_day: sunday
-  min_trades_for_learning: 20
+  min_trades_for_learning: 20    # Minimum trades before learning adjustments apply
   model_path: models/confidence_model.pkl
 
 watchlist:

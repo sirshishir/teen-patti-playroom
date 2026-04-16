@@ -1,26 +1,36 @@
 """
-strategy.py — Entry and exit decision logic for SnipeBot.
+strategy.py — SMC-based entry and exit decision logic.
 
-all_entry_conditions_met() is the main gate.
-build_signal() assembles the trade signal dict passed to order_executor.
+Entry requires ALL six conditions simultaneously:
+  1. Valid market structure (confirmed trend or CHOCH reversal)
+  2. Liquidity sweep completed
+  3. Price inside Fibonacci 0.618–0.786 retracement zone
+  4. Price at / inside an unmitigated order block
+  5. RVOL >= minimum threshold
+  6. ATR expanding (volatility confirmed)
+  7. Session is medium or high activity
+  8. No earnings within buffer days
+  9. VIX below maximum
+ 10. Not in last 15 min of trading day
+
+Output signal includes: entry price, stop-loss, take-profit, confidence.
 """
 
 import logging
 import os
 from datetime import datetime, time as dt_time, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 
 import pytz
 import yaml
 
-from core.indicators import compute_all_indicators
 from data import database as db
 from data.market_data import fetch_vix, earnings_within_days
 
 logger = logging.getLogger(__name__)
 
 _BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-_ET = pytz.timezone("US/Eastern")
+_ET       = pytz.timezone("US/Eastern")
 _HALT_FILE = os.path.join(_BASE_DIR, "HALT.txt")
 
 
@@ -29,9 +39,9 @@ def _load_config() -> Dict:
         return yaml.safe_load(f)
 
 
-def _get_param(name: str, config_value: float) -> float:
+def _get_param(name: str, fallback: float) -> float:
     val = db.get_strategy_param(name)
-    return val if val is not None else config_value
+    return val if val is not None else fallback
 
 
 def halt_file_exists() -> bool:
@@ -39,13 +49,41 @@ def halt_file_exists() -> bool:
 
 
 def _is_within_last_15_min() -> bool:
-    """Return True if current ET time is after 3:45 PM (no new orders)."""
-    now_et = datetime.now(_ET).time()
-    cutoff = dt_time(15, 45)
-    return now_et >= cutoff
+    return datetime.now(_ET).time() >= dt_time(15, 45)
 
 
-# ── Entry Conditions ──────────────────────────────────────────────────────────
+# ── Direction Detection ───────────────────────────────────────────────────────
+
+def detect_direction(indicators: Dict[str, Any]) -> Optional[str]:
+    """
+    Infer trade direction from market structure and liquidity sweep.
+
+    Returns 'call', 'put', or None if ambiguous.
+    """
+    # Prioritise the direction already inferred inside compute_all_indicators
+    direction = indicators.get("inferred_direction")
+    if direction in ("call", "put"):
+        return direction
+
+    # Fallback: derive from structure alone
+    trend      = indicators.get("market_structure", "ranging")
+    sweep_type = indicators.get("sweep_type")
+    choch      = indicators.get("choch", False)
+    struct_dir = indicators.get("structure_direction")
+
+    if choch and struct_dir == "bullish":
+        return "call"
+    if choch and struct_dir == "bearish":
+        return "put"
+    if trend == "uptrend" and sweep_type == "sell_side":
+        return "call"
+    if trend == "downtrend" and sweep_type == "buy_side":
+        return "put"
+
+    return None
+
+
+# ── Entry Gate ────────────────────────────────────────────────────────────────
 
 def all_entry_conditions_met(indicators: Dict[str, Any],
                                vix: float,
@@ -53,148 +91,175 @@ def all_entry_conditions_met(indicators: Dict[str, Any],
                                direction: str,
                                ticker: str) -> bool:
     """
-    Check ALL 8 entry conditions simultaneously.
-    Returns True only if every condition passes.
+    Return True only when every SMC entry condition passes.
     """
     cfg = _load_config()
+    st  = cfg["strategy"]
 
-    # 0. HALT file check
+    # 0. Hard stops
     if halt_file_exists():
-        logger.info("HALT file detected — skipping all signals")
+        logger.debug("HALT file present")
         return False
-
-    # 1. Price in S/R zone
-    if not indicators.get("in_sr_zone", False):
-        return False
-
-    # 2. RSI threshold
-    rsi = indicators["rsi"]
-    rsi_oversold = _get_param("rsi_oversold", cfg["strategy"]["rsi_oversold"])
-    rsi_overbought = _get_param("rsi_overbought", cfg["strategy"]["rsi_overbought"])
-    if direction == "call" and rsi >= rsi_oversold:
-        return False
-    if direction == "put" and rsi <= rsi_overbought:
-        return False
-
-    # 3. MACD crossover in trade direction
-    crossover = indicators.get("macd_crossover", "neutral")
-    if direction == "call" and crossover != "bullish":
-        return False
-    if direction == "put" and crossover != "bearish":
-        return False
-
-    # 4. Volume spike
-    vol_min = _get_param("volume_ratio_min", cfg["strategy"]["volume_ratio_min"])
-    if indicators["volume_ratio"] < vol_min:
-        return False
-
-    # 5. AI confidence threshold
-    conf_min = _get_param("ai_confidence_min", cfg["strategy"]["ai_confidence_min"])
-    if confidence < conf_min:
-        return False
-
-    # 6. No earnings within buffer days
-    buffer = int(_get_param("earnings_buffer_days", cfg["strategy"]["earnings_buffer_days"]))
-    if earnings_within_days(ticker, buffer):
-        logger.info("Earnings within %d days for %s — skip", buffer, ticker)
-        return False
-
-    # 7. VIX below max
-    vix_max = _get_param("vix_max", cfg["strategy"]["vix_max"])
-    if vix is not None and vix >= vix_max:
-        return False
-
-    # 8. Not within last 15 min of trading day
     if _is_within_last_15_min():
+        logger.debug("Within last 15 min — no new entries")
+        return False
+
+    # 1. Market structure must be defined (not ranging)
+    trend = indicators.get("market_structure", "ranging")
+    if trend == "ranging" and not indicators.get("choch", False):
+        logger.debug("%s: market structure is ranging — skip", ticker)
+        return False
+
+    # 2. Liquidity sweep must have occurred
+    if not indicators.get("liquidity_swept", False):
+        logger.debug("%s: no liquidity sweep — skip", ticker)
+        return False
+
+    # 3. Price inside Fibonacci 0.618–0.786 zone
+    if not indicators.get("in_fib_zone", False):
+        logger.debug("%s: price not in Fibonacci zone — skip", ticker)
+        return False
+
+    # 4. Price at / inside an order block (quality > 0)
+    ob_quality = indicators.get("order_block_quality", 0.0)
+    if ob_quality <= 0:
+        logger.debug("%s: no order block confluence — skip", ticker)
+        return False
+
+    # 5. Relative volume confirmation
+    rvol_min = _get_param("rvol_min", st.get("rvol_min", 1.5))
+    if indicators.get("rvol", 0.0) < rvol_min:
+        logger.debug("%s: RVOL %.2f < %.2f — skip", ticker,
+                     indicators.get("rvol", 0), rvol_min)
+        return False
+
+    # 6. ATR volatility expansion
+    atr_min = _get_param("atr_expansion_min", st.get("atr_expansion_min", 1.1))
+    if indicators.get("atr_expansion_ratio", 1.0) < atr_min:
+        logger.debug("%s: ATR not expanding (ratio=%.2f) — skip", ticker,
+                     indicators.get("atr_expansion_ratio", 1.0))
+        return False
+
+    # 7. Session timing
+    session_min = int(_get_param("session_score_min", st.get("session_score_min", 1)))
+    if indicators.get("session_score", 0) < session_min:
+        logger.debug("%s: low-activity session — skip", ticker)
+        return False
+
+    # 8. AI confidence threshold
+    conf_min = _get_param("ai_confidence_min", st.get("ai_confidence_min", 0.72))
+    if confidence < conf_min:
+        logger.debug("%s: confidence %.3f < %.3f — skip", ticker, confidence, conf_min)
+        return False
+
+    # 9. No earnings within buffer days
+    buffer = int(_get_param("earnings_buffer_days", st.get("earnings_buffer_days", 5)))
+    if earnings_within_days(ticker, buffer):
+        logger.info("%s: earnings within %d days — skip", ticker, buffer)
+        return False
+
+    # 10. VIX below max
+    vix_max = _get_param("vix_max", st.get("vix_max", 30))
+    if vix is not None and vix >= vix_max:
+        logger.debug("%s: VIX %.1f >= %.1f — skip", ticker, vix, vix_max)
         return False
 
     return True
 
 
-# ── Direction Detection ───────────────────────────────────────────────────────
-
-def detect_direction(indicators: Dict[str, Any]) -> Optional[str]:
-    """
-    Determine trade direction ('call' or 'put') from indicator alignment.
-    Returns None if direction is ambiguous.
-    """
-    rsi = indicators["rsi"]
-    crossover = indicators.get("macd_crossover", "neutral")
-
-    bullish_rsi = rsi < 40
-    bearish_rsi = rsi > 60
-    bullish_macd = crossover == "bullish"
-    bearish_macd = crossover == "bearish"
-
-    if bullish_rsi and bullish_macd:
-        return "call"
-    if bearish_rsi and bearish_macd:
-        return "put"
-    return None
-
-
 # ── Signal Builder ────────────────────────────────────────────────────────────
 
 def build_signal(ticker: str,
-                 zone: Dict,
                  indicators: Dict[str, Any],
                  confidence: float,
                  vix: float,
                  direction: str) -> Dict[str, Any]:
     """
-    Assemble the trade signal dict. Does NOT include option contract details —
-    those are added by scanner.py after options chain lookup.
+    Assemble the full trade signal dict.
+
+    Includes entry price, stop-loss, and take-profit derived from order block
+    and ATR so the executor and Discord message have precise levels.
     """
     cfg = _load_config()
-    now_utc = datetime.now(timezone.utc)
-    regime = indicators.get("market_regime", "ranging")
+    st  = cfg["strategy"]
+    now = datetime.now(timezone.utc)
+
+    current_price = indicators["current_price"]
+    atr           = indicators.get("atr", current_price * 0.01)
+    nearest_ob    = indicators.get("nearest_ob") or {}
+    fib           = indicators.get("fib") or {}
+
+    # Stop-loss: just below/above the order block (+ 0.5 ATR buffer)
+    if direction == "call":
+        sl_price = round((nearest_ob.get("low", current_price) - 0.5 * atr), 4)
+    else:
+        sl_price = round((nearest_ob.get("high", current_price) + 0.5 * atr), 4)
+
+    # Take-profit: toward the swing high/low (minimum 2:1 R:R)
+    sl_dist = abs(current_price - sl_price)
+    if direction == "call":
+        tp_price = round(current_price + max(sl_dist * 2, atr * 3), 4)
+    else:
+        tp_price = round(current_price - max(sl_dist * 2, atr * 3), 4)
 
     return {
-        "ticker": ticker,
-        "direction": direction,
-        "signal_time": now_utc.isoformat(),
-        "current_price": indicators["current_price"],
-        "rsi": indicators["rsi"],
-        "macd_crossover": indicators.get("macd_crossover", "neutral"),
-        "macd_histogram": indicators.get("macd_histogram", 0.0),
-        "volume_ratio": indicators["volume_ratio"],
-        "sr_zone": zone,
-        "sr_zone_quality": zone.get("quality", 0.0),
-        "vix": vix,
-        "ai_confidence": confidence,
-        "market_regime": regime,
-        # Filled by scanner after options chain lookup:
-        "option_symbol": None,
-        "strike": None,
-        "expiry": None,
-        "dte": None,
-        "premium": None,
-        "qty": None,
-        "total_cost": None,
+        "ticker":             ticker,
+        "direction":          direction,
+        "signal_time":        now.isoformat(),
+        "current_price":      current_price,
+        # SMC context
+        "market_structure":   indicators.get("market_structure"),
+        "choch":              indicators.get("choch", False),
+        "sweep_type":         indicators.get("sweep_type"),
+        "sweep_level":        indicators.get("sweep_level"),
+        "fib_zone_low":       fib.get("zone_low"),
+        "fib_zone_high":      fib.get("zone_high"),
+        "ob_high":            nearest_ob.get("high"),
+        "ob_low":             nearest_ob.get("low"),
+        "ob_quality":         indicators.get("order_block_quality", 0.0),
+        # Metrics
+        "rvol":               indicators.get("rvol"),
+        "atr":                atr,
+        "atr_expansion_ratio": indicators.get("atr_expansion_ratio"),
+        "session_score":      indicators.get("session_score"),
+        "vix":                vix,
+        "ai_confidence":      confidence,
+        # Levels
+        "entry_price":        current_price,
+        "sl_price":           sl_price,
+        "tp_price":           tp_price,
+        # Filled by scanner after options chain lookup
+        "option_symbol":      None,
+        "strike":             None,
+        "expiry":             None,
+        "dte":                None,
+        "premium":            None,
+        "qty":                None,
+        "total_cost":         None,
     }
 
 
 # ── Trade Record Builder ──────────────────────────────────────────────────────
 
 def signal_to_trade_record(signal: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert an approved signal into a DB trade insert record."""
+    """Convert an approved signal into a DB insert record."""
     from datetime import date
     return {
-        "ticker": signal["ticker"],
-        "direction": signal["direction"],
-        "entry_price": signal.get("premium"),
-        "exit_price": None,
-        "entry_date": date.today().isoformat(),
-        "exit_date": None,
-        "pnl": None,
-        "pnl_pct": None,
-        "exit_reason": None,
-        "rsi_at_entry": signal.get("rsi"),
-        "macd_signal": signal.get("macd_crossover"),
-        "volume_ratio": signal.get("volume_ratio"),
-        "sr_zone_quality": signal.get("sr_zone_quality"),
-        "vix_at_entry": signal.get("vix"),
-        "ai_confidence": signal.get("ai_confidence"),
-        "market_regime": signal.get("market_regime"),
-        "outcome": None,
+        "ticker":          signal["ticker"],
+        "direction":       signal["direction"],
+        "entry_price":     signal.get("premium"),
+        "exit_price":      None,
+        "entry_date":      date.today().isoformat(),
+        "exit_date":       None,
+        "pnl":             None,
+        "pnl_pct":         None,
+        "exit_reason":     None,
+        "rsi_at_entry":    None,                           # not used in SMC strategy
+        "macd_signal":     signal.get("sweep_type"),       # repurposed field
+        "volume_ratio":    signal.get("rvol"),
+        "sr_zone_quality": signal.get("ob_quality"),
+        "vix_at_entry":    signal.get("vix"),
+        "ai_confidence":   signal.get("ai_confidence"),
+        "market_regime":   signal.get("market_structure"),
+        "outcome":         None,
     }
