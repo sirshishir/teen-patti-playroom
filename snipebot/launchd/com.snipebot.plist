@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.snipebot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/snipebot/venv/bin/python</string>
+        <string>/path/to/snipebot/main.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/path/to/snipebot/logs/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/snipebot/logs/stderr.log</string>
+    <key>WorkingDirectory</key>
+    <string>/path/to/snipebot</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/path/to/snipebot/venv/bin</string>
+    </dict>
+</dict>
+</plist>
