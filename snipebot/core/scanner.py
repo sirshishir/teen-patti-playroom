@@ -1,13 +1,10 @@
 """
-scanner.py — 5-minute SMC market scanner.
+scanner.py — 30-minute SMC market scanner (1-hour bar entry trigger).
 
-Runs every 5 minutes during market hours (9:35–3:45 ET, Mon–Fri).
-For each watchlist ticker it:
-  1. Fetches the latest 5-minute bars
-  2. Combines them with the daily analysis cache (structure, OBs, liquidity, Fib)
-  3. Evaluates all SMC entry conditions
-  4. Fires an order when every condition is met
+Appropriate for 14–30 DTE options: uses 1-hour bars for entry timing,
+daily bars for structure/OBs/Fib (pre-cached at 9 AM), weekly bars for bias.
 
+Runs every 30 minutes during market hours (9:30–3:30 ET, Mon–Fri).
 Data-fetch failure tracking: 3 consecutive failures → Discord alert + 15-min pause.
 """
 
@@ -100,7 +97,7 @@ def run_scan() -> None:
             logger.info("%s paused (data errors) — skipping", ticker)
             continue
 
-        # ── Fetch 5-min bars ────────────────────────────────────────────────
+        # ── Fetch 1-hour bars (entry trigger timeframe) ─────────────────────
         df = _safe_fetch_ohlcv(ticker)
         if df is None:
             continue
@@ -236,7 +233,7 @@ def _notify_entry(signal: Dict, indicators: Dict) -> None:
 
 
 def _safe_fetch_ohlcv(ticker: str):
-    df = fetch_ohlcv(ticker, interval="5Min", period_days=5)
+    df = fetch_ohlcv(ticker, interval="1Hour", period_days=20)
     if df is None or df.empty:
         _fetch_failure_count[ticker] += 1
         logger.warning("%s fetch failed (count=%d)", ticker,

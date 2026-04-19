@@ -1,17 +1,19 @@
 """
 strategy.py — SMC-based entry and exit decision logic.
 
-Entry requires ALL six conditions simultaneously:
-  1. Valid market structure (confirmed trend or CHOCH reversal)
-  2. Liquidity sweep completed
-  3. Price inside Fibonacci 0.618–0.786 retracement zone
-  4. Price at / inside an unmitigated order block
-  5. RVOL >= minimum threshold
-  6. ATR expanding (volatility confirmed)
-  7. Session is medium or high activity
-  8. No earnings within buffer days
-  9. VIX below maximum
- 10. Not in last 15 min of trading day
+Entry requires ALL conditions simultaneously:
+  1. Weekly bias aligns with direction (macro top-down filter)
+  2. Daily market structure confirmed (trend or CHOCH reversal)
+  3. Liquidity sweep completed (on 1H bars)
+  4. Price inside Fibonacci 0.618–0.786 retracement zone (daily swing)
+  5. Price at / inside an unmitigated daily order block
+  6. RVOL >= minimum threshold (1H bars)
+  7. ATR expanding (1H bars)
+  8. Session is medium or high activity
+  9. AI confidence >= threshold
+ 10. No earnings within buffer days
+ 11. VIX below maximum
+ 12. Not in last 15 min of trading day
 
 Output signal includes: entry price, stop-loss, take-profit, confidence.
 """
@@ -104,10 +106,19 @@ def all_entry_conditions_met(indicators: Dict[str, Any],
         logger.debug("Within last 15 min — no new entries")
         return False
 
-    # 1. Market structure must be defined (not ranging)
+    # 1. Weekly macro bias must align with direction (top-down filter)
+    weekly_trend = indicators.get("weekly_trend", "ranging")
+    if direction == "call" and weekly_trend != "uptrend":
+        logger.debug("%s: weekly bias is '%s' — no call entries", ticker, weekly_trend)
+        return False
+    if direction == "put" and weekly_trend != "downtrend":
+        logger.debug("%s: weekly bias is '%s' — no put entries", ticker, weekly_trend)
+        return False
+
+    # 2. Daily market structure must be defined (not ranging)
     trend = indicators.get("market_structure", "ranging")
     if trend == "ranging" and not indicators.get("choch", False):
-        logger.debug("%s: market structure is ranging — skip", ticker)
+        logger.debug("%s: daily market structure is ranging — skip", ticker)
         return False
 
     # 2. Liquidity sweep must have occurred

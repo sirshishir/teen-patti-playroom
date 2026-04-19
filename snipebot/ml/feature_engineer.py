@@ -36,6 +36,7 @@ FEATURE_NAMES = [
     "liquidity_swept",
     "session_score",
     "ob_distance_pct",
+    "has_4h_ob_confluence",     # 4H order block confirms daily OB direction
 ]
 
 
@@ -57,6 +58,8 @@ def build_feature_vector(indicators: Dict[str, Any],
 
     swept = 1.0 if indicators.get("liquidity_swept", False) else 0.0
 
+    has_4h = 1.0 if indicators.get("has_4h_ob_confluence", False) else 0.0
+
     vec = np.array([
         struct_enc,
         float(indicators.get("fib_zone_distance",    1.0)),
@@ -66,6 +69,7 @@ def build_feature_vector(indicators: Dict[str, Any],
         swept,
         float(indicators.get("session_score",        0)),
         float(indicators.get("ob_distance_pct",      1.0)),
+        has_4h,
     ], dtype=np.float32)
 
     return vec
@@ -103,6 +107,7 @@ def build_features_from_trade_row(trade: Dict[str, Any]) -> Optional[np.ndarray]
             swept,
             1.0,                                             # session_score (not stored)
             0.0,                                             # ob_distance_pct (not stored)
+            0.0,                                             # has_4h_ob_confluence (not stored historically)
         ], dtype=np.float32)
 
         return vec
@@ -181,9 +186,13 @@ def rule_based_confidence(indicators: Dict[str, Any],
     rvol_score = min(1.0, (rvol - 1.0) / 1.5)
     score += max(0.0, rvol_score) * 0.15
 
-    # 5. ATR expansion (0.15)
+    # 5. ATR expansion (0.10)
     atr_ratio = indicators.get("atr_expansion_ratio", 1.0)
     atr_score = min(1.0, (atr_ratio - 1.0) / 0.5)
-    score += max(0.0, atr_score) * 0.15
+    score += max(0.0, atr_score) * 0.10
+
+    # 6. 4H order block confluence bonus (0.05)
+    if indicators.get("has_4h_ob_confluence", False):
+        score += 0.05
 
     return round(min(score, 1.0), 4)
