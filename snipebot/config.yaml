@@ -6,16 +6,29 @@ trading:
   max_daily_loss: 300
 
 strategy:
+  # ── Multi-Timeframe Stack (for 14–30 DTE options) ─────────────────────────
+  # Weekly  → macro bias (must align before any entry is considered)
+  # Daily   → market structure, order blocks, Fibonacci swing
+  # 4-Hour  → intermediate OB confluence confirmation
+  # 1-Hour  → entry trigger: liquidity sweep, RVOL, ATR
+  weekly_lookback_weeks: 52      # Weekly bars for bias detection
+  weekly_sma_period: 20          # SMA period for weekly trend confirmation
+  daily_lookback_days: 60        # Daily bars for structure and OB detection
+  h4_lookback_days: 30           # 4-hour bars for intermediate OB detection
+  entry_timeframe: 1Hour         # Bar timeframe used for entry trigger
+  scan_interval_minutes: 30      # How often the scanner runs
+
   # ── SMC Entry Filters ──────────────────────────────────────────────────────
   fib_zone_min: 0.618            # Lower Fibonacci retracement bound for entry
   fib_zone_max: 0.786            # Upper Fibonacci retracement bound for entry
-  rvol_min: 1.5                  # Minimum relative volume (current / 20-bar avg)
-  atr_expansion_min: 1.1         # Min fast-ATR / slow-ATR ratio (volatility expansion)
+  rvol_min: 1.5                  # Minimum relative volume (current / 20-bar avg on 1H)
+  atr_expansion_min: 1.1         # Min fast-ATR / slow-ATR ratio (1H bars)
   session_score_min: 1           # Minimum session score (0=low, 1=medium, 2=high)
-  ob_tolerance: 0.003            # Order block proximity tolerance (±0.3%)
+  ob_tolerance: 0.003            # Daily order block proximity tolerance (±0.3%)
+  ob_4h_tolerance: 0.005         # 4H order block proximity tolerance (±0.5%)
   liquidity_zone_tolerance: 0.002 # Equal high/low detection tolerance (±0.2%)
   swing_lookback: 50             # Bars used for Fibonacci swing detection
-  struct_swing_order: 3          # argrelextrema neighbourhood for swing points
+  struct_swing_order: 3          # argrelextrema neighbourhood for daily swing points
 
   # ── Universal Filters (unchanged) ─────────────────────────────────────────
   vix_max: 30                    # Skip when VIX >= this value

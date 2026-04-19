@@ -82,7 +82,9 @@ def _fetch_alpaca_bars(ticker: str, interval: str,
         "5Min":  TimeFrame(5,  TimeFrameUnit.Minute),
         "15Min": TimeFrame(15, TimeFrameUnit.Minute),
         "1Hour": TimeFrame(1,  TimeFrameUnit.Hour),
+        "4Hour": TimeFrame(4,  TimeFrameUnit.Hour),
         "1Day":  TimeFrame(1,  TimeFrameUnit.Day),
+        "1Week": TimeFrame(1,  TimeFrameUnit.Week),
     }
     tf    = tf_map.get(interval, TimeFrame(5, TimeFrameUnit.Minute))
     end   = datetime.utcnow()
@@ -104,7 +106,7 @@ def _fetch_alpaca_bars(ticker: str, interval: str,
 
 def _fetch_yfinance_bars(ticker: str, interval: str,
                           period_days: int) -> pd.DataFrame:
-    yf_map = {"1Min": "1m", "5Min": "5m", "15Min": "15m",
+    yf_map = {"1Min": "1m", "5Min": "5m", "15Min": "15m", "1Week": "1wk",
               "1Hour": "1h", "1Day": "1d"}
     df = yf.download(ticker, period=f"{period_days}d",
                      interval=yf_map.get(interval, "5m"),
@@ -117,6 +119,51 @@ def _fetch_yfinance_bars(ticker: str, interval: str,
 
 def fetch_daily_ohlcv(ticker: str, lookback_days: int = 60) -> Optional[pd.DataFrame]:
     return fetch_ohlcv(ticker, interval="1Day", period_days=lookback_days)
+
+
+def fetch_weekly_ohlcv(ticker: str, lookback_weeks: int = 52) -> Optional[pd.DataFrame]:
+    """Fetch weekly bars for macro bias detection (52-week default = 1 year)."""
+    return fetch_ohlcv(ticker, interval="1Week", period_days=lookback_weeks * 7)
+
+
+def fetch_4h_ohlcv(ticker: str, lookback_days: int = 30) -> Optional[pd.DataFrame]:
+    """
+    Fetch 4-hour bars for intermediate order block confirmation.
+    Alpaca: native 4H bars.
+    yfinance fallback: fetch 1H bars and resample to 4H.
+    """
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return _fetch_alpaca_bars(ticker, "4Hour", lookback_days)
+        except Exception as exc:
+            logger.warning("Alpaca 4H attempt %d failed for %s: %s",
+                           attempt, ticker, exc)
+            time.sleep(_RETRY_DELAY * attempt)
+
+    logger.warning("Falling back to yfinance 1H→4H resample for %s", ticker)
+    try:
+        return _fetch_yfinance_4h(ticker, lookback_days)
+    except Exception as exc:
+        logger.error("4H fetch failed entirely for %s: %s", ticker, exc)
+        return None
+
+
+def _fetch_yfinance_4h(ticker: str, lookback_days: int) -> pd.DataFrame:
+    """yfinance 1H download resampled to 4H (yfinance has no native 4H)."""
+    period = min(lookback_days, 59)   # yfinance caps 1H at 60 days
+    df = yf.download(ticker, period=f"{period}d", interval="1h",
+                     auto_adjust=True, progress=False)
+    if df.empty:
+        raise ValueError(f"yfinance 1H empty for {ticker}")
+    df.columns = [c.lower() for c in df.columns]
+    df_4h = df.resample("4h").agg({
+        "open": "first", "high": "max",
+        "low":  "min",   "close": "last",
+        "volume": "sum",
+    }).dropna()
+    if df_4h.empty:
+        raise ValueError(f"4H resample empty for {ticker}")
+    return df_4h
 
 
 # ── VIX ───────────────────────────────────────────────────────────────────────
@@ -264,48 +311,71 @@ def cache_sr_zones() -> None:
     """
     Called once at 9:00 AM ET (scheduler-compatible name kept).
 
-    Builds and stores the full SMC daily analysis for every watchlist ticker:
-      - Market structure (trend, BOS, CHOCH, swing points)
-      - Order blocks (bullish + bearish, unmitigated)
-      - Liquidity zones (equal highs / equal lows)
-      - Fibonacci retracement levels (current swing)
+    Builds the full multi-timeframe SMC analysis for every watchlist ticker:
+      Weekly  → macro bias (trend direction + 20-week SMA)
+      Daily   → market structure, order blocks, liquidity zones, Fibonacci
+      4-Hour  → intermediate order blocks for entry confluence
     """
     from core.indicators import (
         detect_swing_points, detect_market_structure,
         detect_liquidity_zones, detect_order_blocks,
         compute_fibonacci_levels, compute_atr,
+        detect_weekly_bias,
     )
 
     watchlist = ["GOOGL", "MSFT", "TSLA", "AAPL", "SPY"]
     for ticker in watchlist:
         try:
-            df = fetch_daily_ohlcv(ticker, lookback_days=60)
-            if df is None or df.empty:
+            # ── Weekly bias ────────────────────────────────────────────────
+            df_weekly   = fetch_weekly_ohlcv(ticker, lookback_weeks=52)
+            weekly_bias = (detect_weekly_bias(df_weekly)
+                           if df_weekly is not None and not df_weekly.empty
+                           else {"trend": "ranging"})
+            time.sleep(0.2)
+
+            # ── Daily structure ────────────────────────────────────────────
+            df_daily = fetch_daily_ohlcv(ticker, lookback_days=60)
+            if df_daily is None or df_daily.empty:
                 logger.warning("No daily data for %s — cache skipped", ticker)
                 continue
 
-            sh_idx, sl_idx = detect_swing_points(df, order=3)
-            market_struct  = detect_market_structure(df, sh_idx, sl_idx)
-            liquidity_zones = detect_liquidity_zones(df)
-            atr_val        = compute_atr(df, period=14)
-            order_blocks   = detect_order_blocks(df, sh_idx, sl_idx, atr_val)
-            fib            = compute_fibonacci_levels(df, sh_idx, sl_idx, market_struct)
+            sh_idx, sl_idx  = detect_swing_points(df_daily, order=3)
+            market_struct   = detect_market_structure(df_daily, sh_idx, sl_idx)
+            liquidity_zones = detect_liquidity_zones(df_daily)
+            atr_daily       = compute_atr(df_daily, period=14)
+            order_blocks    = detect_order_blocks(df_daily, sh_idx, sl_idx, atr_daily)
+            fib             = compute_fibonacci_levels(df_daily, sh_idx, sl_idx,
+                                                       market_struct)
+            time.sleep(0.2)
+
+            # ── 4-Hour order blocks ────────────────────────────────────────
+            df_4h  = fetch_4h_ohlcv(ticker, lookback_days=30)
+            ob_4h  = []
+            if df_4h is not None and len(df_4h) >= 10:
+                sh_4h, sl_4h = detect_swing_points(df_4h, order=2)
+                atr_4h       = compute_atr(df_4h, period=14)
+                ob_4h        = detect_order_blocks(df_4h, sh_4h, sl_4h, atr_4h)
+            time.sleep(0.2)
 
             _analysis_cache[ticker] = {
-                "market_structure":  market_struct,
-                "order_blocks":      order_blocks,
-                "liquidity_zones":   liquidity_zones,
-                "fibonacci":         fib,
+                "weekly_bias":     weekly_bias,
+                "market_structure": market_struct,
+                "order_blocks":    order_blocks,
+                "liquidity_zones": liquidity_zones,
+                "fibonacci":       fib,
+                "ob_4h":           ob_4h,
             }
             logger.info(
-                "Analysis cached for %s: trend=%s OBs=%d liq_zones=%d",
-                ticker, market_struct.get("trend"),
-                len(order_blocks), len(liquidity_zones),
+                "Cache built for %s: weekly=%s daily=%s "
+                "daily_OBs=%d 4H_OBs=%d liq_zones=%d",
+                ticker,
+                weekly_bias.get("trend"),
+                market_struct.get("trend"),
+                len(order_blocks), len(ob_4h), len(liquidity_zones),
             )
+
         except Exception as exc:
             logger.error("Cache error for %s: %s", ticker, exc)
-
-        time.sleep(0.2)  # Alpaca rate-limit
 
 
 def get_cached_analysis(ticker: str) -> Dict:

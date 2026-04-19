@@ -1,15 +1,11 @@
 """
 indicators.py — Smart Money Concepts (SMC) technical analysis engine.
 
-Implements:
-  - Market structure: swing points, BOS, CHOCH, trend classification
-  - Liquidity zones: equal highs/lows detection
-  - Liquidity sweep detection: stop-hunt identification
-  - Order block detection: bullish and bearish institutional zones
-  - Fibonacci retracement: auto-swing detection, 0.618–0.786 zone
-  - Relative Volume (RVOL)
-  - ATR and volatility expansion
-  - Session timing filter (London/NY overlap)
+Multi-timeframe stack (appropriate for 14–30 DTE options):
+  Weekly  → detect_weekly_bias()          macro trend direction
+  Daily   → detect_market_structure()     BOS/CHOCH, order blocks, Fib, liquidity
+  4-Hour  → check_4h_ob_confluence()      intermediate OB confirmation
+  1-Hour  → compute_all_indicators()      entry trigger: sweep, RVOL, ATR, session
 """
 
 import logging
@@ -494,6 +490,81 @@ def fib_zone_distance(price: float, fib: Dict) -> float:
     return abs(price - nearest) / price
 
 
+# ── Weekly Bias ───────────────────────────────────────────────────────────────
+
+def detect_weekly_bias(df_weekly: pd.DataFrame) -> Dict:
+    """
+    Determine macro trend from weekly bars using swing structure + 20-week SMA.
+
+    Both swing structure AND SMA must agree to declare a trend — if they
+    conflict the bias is 'ranging' and no trades are taken.
+
+    Returns dict with keys:
+      trend      : 'uptrend' | 'downtrend' | 'ranging'
+      sma20      : float
+      above_sma  : bool
+      raw_structure : raw trend from swing analysis (before SMA filter)
+    """
+    if len(df_weekly) < 10:
+        return {"trend": "ranging", "sma20": None,
+                "above_sma": None, "raw_structure": "ranging"}
+
+    sh_idx, sl_idx = detect_swing_points(df_weekly, order=2)
+    struct         = detect_market_structure(df_weekly, sh_idx, sl_idx)
+
+    close      = df_weekly["close"].astype(float)
+    sma_period = min(20, len(close) - 1)
+    sma20      = float(close.rolling(sma_period).mean().iloc[-1])
+    above_sma  = float(close.iloc[-1]) > sma20
+    raw_trend  = struct["trend"]
+
+    if raw_trend == "uptrend" and above_sma:
+        final_trend = "uptrend"
+    elif raw_trend == "downtrend" and not above_sma:
+        final_trend = "downtrend"
+    else:
+        final_trend = "ranging"   # conflicting signals — sit out
+
+    return {
+        "trend":         final_trend,
+        "sma20":         round(sma20, 4),
+        "above_sma":     above_sma,
+        "raw_structure": raw_trend,
+    }
+
+
+# ── 4-Hour OB Confluence ──────────────────────────────────────────────────────
+
+def check_4h_ob_confluence(price: float,
+                            ob_4h: List[Dict],
+                            direction: str,
+                            tolerance: float = 0.005) -> Tuple[bool, float]:
+    """
+    Return (has_confluence, quality_score) if *price* is inside or near a
+    4-hour order block that aligns with *direction*.
+
+    For calls : look for unmitigated bullish 4H OB near current price
+    For puts  : look for unmitigated bearish 4H OB near current price
+
+    tolerance : expanded OB boundary (±0.5% default — wider than daily)
+    """
+    if not ob_4h:
+        return False, 0.0
+
+    ob_type    = "bullish" if direction == "call" else "bearish"
+    candidates = [ob for ob in ob_4h
+                  if ob["type"] == ob_type and not ob.get("mitigated", False)]
+
+    best_quality = 0.0
+    for ob in candidates:
+        lo = ob["low"]  * (1 - tolerance)
+        hi = ob["high"] * (1 + tolerance)
+        if lo <= price <= hi:
+            best_quality = max(best_quality, ob.get("strength", 1.0))
+
+    return best_quality > 0, round(best_quality, 4)
+
+
 # ── Relative Volume ───────────────────────────────────────────────────────────
 
 def compute_rvol(df: pd.DataFrame, period: int = 20) -> float:
@@ -590,17 +661,21 @@ def compute_all_indicators(df: pd.DataFrame,
 
     # ── Pull from daily cache if available ──────────────────────────────────
     if cached_analysis:
-        market_struct  = cached_analysis.get("market_structure", {})
-        order_blocks   = cached_analysis.get("order_blocks", [])
+        weekly_bias     = cached_analysis.get("weekly_bias", {"trend": "ranging"})
+        market_struct   = cached_analysis.get("market_structure", {})
+        order_blocks    = cached_analysis.get("order_blocks", [])
         liquidity_zones = cached_analysis.get("liquidity_zones", [])
-        fib            = cached_analysis.get("fibonacci", {})
+        fib             = cached_analysis.get("fibonacci", {})
+        ob_4h           = cached_analysis.get("ob_4h", [])
     else:
+        weekly_bias    = {"trend": "ranging"}
         sh_idx, sl_idx = detect_swing_points(df, order=3)
         market_struct  = detect_market_structure(df, sh_idx, sl_idx)
         liquidity_zones = detect_liquidity_zones(df)
         atr_val_d      = compute_atr(df)
         order_blocks   = detect_order_blocks(df, sh_idx, sl_idx, atr_val_d)
         fib            = compute_fibonacci_levels(df, sh_idx, sl_idx, market_struct)
+        ob_4h          = []
 
     # ── Intraday indicators from 5-min df ────────────────────────────────────
     rvol             = compute_rvol(df)
@@ -628,11 +703,13 @@ def compute_all_indicators(df: pd.DataFrame,
         inferred_direction = None
 
     # ── Direction-dependent checks ───────────────────────────────────────────
-    in_fib_zone = False
-    fib_dist    = 1.0
-    nearest_ob  = None
-    ob_quality  = 0.0
-    ob_dist     = 1.0
+    in_fib_zone     = False
+    fib_dist        = 1.0
+    nearest_ob      = None
+    ob_quality      = 0.0
+    ob_dist         = 1.0
+    has_4h_conf     = False
+    ob_4h_quality   = 0.0
 
     if inferred_direction and fib:
         in_fib_zone = price_in_fib_zone(current_price, fib, inferred_direction)
@@ -640,37 +717,46 @@ def compute_all_indicators(df: pd.DataFrame,
         nearest_ob, ob_quality, ob_dist = nearest_order_block(
             current_price, order_blocks, inferred_direction
         )
+        has_4h_conf, ob_4h_quality = check_4h_ob_confluence(
+            current_price, ob_4h, inferred_direction
+        )
 
     return {
-        "current_price":      current_price,
-        # Market structure
-        "market_structure":   trend,
-        "bos":                market_struct.get("bos", False),
-        "choch":              choch,
-        "structure_direction": struct_dir,
-        "last_sh":            market_struct.get("last_sh"),
-        "last_sl":            market_struct.get("last_sl"),
-        # Liquidity
-        "liquidity_zones":    liquidity_zones,
-        "liquidity_swept":    sweep.get("swept", False),
-        "sweep_type":         sweep.get("sweep_type"),
-        "sweep_level":        sweep.get("sweep_level"),
-        # Fibonacci
-        "fib":                fib,
-        "in_fib_zone":        in_fib_zone,
-        "fib_zone_distance":  fib_dist,
-        # Order blocks
-        "order_blocks":       order_blocks,
-        "nearest_ob":         nearest_ob,
-        "order_block_quality": ob_quality,
-        "ob_distance_pct":    ob_dist,
-        # Volume & volatility
-        "rvol":               rvol,
-        "atr":                round(atr_val, 6),
-        "atr_expanding":      atr_expanding,
-        "atr_expansion_ratio": atr_ratio,
-        # Session
-        "session_score":      session_score,
-        # Inferred direction (may be None)
-        "inferred_direction": inferred_direction,
+        "current_price":        current_price,
+        # Weekly macro bias
+        "weekly_bias":          weekly_bias,
+        "weekly_trend":         weekly_bias.get("trend", "ranging"),
+        # Daily market structure
+        "market_structure":     trend,
+        "bos":                  market_struct.get("bos", False),
+        "choch":                choch,
+        "structure_direction":  struct_dir,
+        "last_sh":              market_struct.get("last_sh"),
+        "last_sl":              market_struct.get("last_sl"),
+        # Liquidity (checked on 1H bars)
+        "liquidity_zones":      liquidity_zones,
+        "liquidity_swept":      sweep.get("swept", False),
+        "sweep_type":           sweep.get("sweep_type"),
+        "sweep_level":          sweep.get("sweep_level"),
+        # Fibonacci (daily swing)
+        "fib":                  fib,
+        "in_fib_zone":          in_fib_zone,
+        "fib_zone_distance":    fib_dist,
+        # Daily order blocks
+        "order_blocks":         order_blocks,
+        "nearest_ob":           nearest_ob,
+        "order_block_quality":  ob_quality,
+        "ob_distance_pct":      ob_dist,
+        # 4-Hour OB confluence
+        "has_4h_ob_confluence": has_4h_conf,
+        "ob_4h_quality":        ob_4h_quality,
+        # Volume & volatility (1H bars)
+        "rvol":                 rvol,
+        "atr":                  round(atr_val, 6),
+        "atr_expanding":        atr_expanding,
+        "atr_expansion_ratio":  atr_ratio,
+        # Session timing
+        "session_score":        session_score,
+        # Inferred direction
+        "inferred_direction":   inferred_direction,
     }

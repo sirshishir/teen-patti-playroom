@@ -113,18 +113,20 @@ def build_scheduler() -> BlockingScheduler:
         misfire_grace_time=300,
     )
 
-    # Market scanner — every 5 min, Mon–Fri, 9:35–15:45 ET
+    # Market scanner — every 30 min, Mon–Fri, 9:30–15:30 ET
+    # Uses 1-hour bars: 30-min scan frequency is sufficient and appropriate
+    # for 14–30 DTE options entries; avoids overtrading on noise
     scheduler.add_job(
         _guarded_scan,
         CronTrigger(
             day_of_week="mon-fri",
             hour="9-15",
-            minute="*/5",
+            minute="*/30",
             timezone=ET,
         ),
         id="scanner",
-        name="Market Scanner",
-        misfire_grace_time=60,
+        name="Market Scanner (30-min, 1H bars)",
+        misfire_grace_time=300,
     )
 
     # Open position monitor — every 1 min, Mon–Fri, 9:35–15:55 ET
