@@ -30,7 +30,8 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 # ── Logging Setup ─────────────────────────────────────────────────────────────
 
 def setup_logging() -> None:
-    log_dir = os.path.join(BASE_DIR, "logs")
+    _DATA_DIR = os.getenv("SNIPEBOT_DATA_DIR", BASE_DIR)
+    log_dir = os.path.join(_DATA_DIR, "logs")
     os.makedirs(log_dir, exist_ok=True)
 
     log_file = os.path.join(log_dir, "snipebot.log")
@@ -169,9 +170,12 @@ def build_scheduler() -> BlockingScheduler:
 def main() -> None:
     logger.info("SnipeBot starting up...")
 
-    # Ensure models/ and logs/ directories exist
+    # models/ lives alongside the source code (BASE_DIR) — it is not user data
+    # and is regenerated at runtime; it does not belong on the /data volume.
+    # logs/ and the SQLite DB live on the /data volume (SNIPEBOT_DATA_DIR).
+    _data_dir = os.getenv("SNIPEBOT_DATA_DIR", BASE_DIR)
     os.makedirs(os.path.join(BASE_DIR, "models"), exist_ok=True)
-    os.makedirs(os.path.join(BASE_DIR, "logs"), exist_ok=True)
+    os.makedirs(os.path.join(_data_dir, "logs"), exist_ok=True)
 
     # Initialise database (create tables if not exist)
     db.init_db()

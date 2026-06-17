@@ -1,6 +1,10 @@
 """
 market_data.py — Fetch OHLCV, options chain, and VIX data.
-Primary source: Alpaca Data API. Fallback: yfinance.
+
+Broker routing (controlled by BROKER env var):
+  "alpaca" (default) — Primary source: Alpaca Data API. Fallback: yfinance.
+  "webull"           — Primary source: Webull Developer API. Fallback: yfinance.
+                       Alpaca calls are skipped entirely when BROKER=webull.
 
 Daily analysis cache (populated at 9 AM ET):
   Stores market structure, order blocks, liquidity zones, and Fibonacci levels
@@ -24,6 +28,11 @@ _analysis_cache: Dict[str, Dict] = {}
 
 _MAX_RETRIES = 3
 _RETRY_DELAY = 0.5
+
+
+def _get_broker() -> str:
+    """Return the active broker name, lower-cased. Defaults to 'alpaca'."""
+    return os.getenv("BROKER", "alpaca").lower()
 
 
 def _get_alpaca_stock_client():
@@ -56,20 +65,77 @@ def _get_trading_client():
 
 def fetch_ohlcv(ticker: str, interval: str = "5Min",
                 period_days: int = 5) -> Optional[pd.DataFrame]:
-    for attempt in range(1, _MAX_RETRIES + 1):
-        try:
-            return _fetch_alpaca_bars(ticker, interval, period_days)
-        except Exception as exc:
-            logger.warning("Alpaca OHLCV attempt %d failed for %s: %s",
-                           attempt, ticker, exc)
-            time.sleep(_RETRY_DELAY * attempt)
+    """
+    Fetch OHLCV bars for *ticker*.
 
-    logger.warning("Falling back to yfinance for %s", ticker)
-    try:
-        return _fetch_yfinance_bars(ticker, interval, period_days)
-    except Exception as exc:
-        logger.error("yfinance also failed for %s: %s", ticker, exc)
-        return None
+    When BROKER=webull: tries Webull first, falls back to yfinance (skips Alpaca).
+    When BROKER=alpaca (default): tries Alpaca with retries, falls back to yfinance.
+    """
+    broker = _get_broker()
+
+    if broker == "webull":
+        # ── Webull primary, yfinance fallback ─────────────────────────────────
+        try:
+            df = _fetch_webull_bars(ticker, interval, period_days)
+            if df is not None and not df.empty:
+                return df
+            raise ValueError("Empty Webull bars")
+        except Exception as exc:
+            logger.warning(
+                "Webull OHLCV failed for %s: %s — falling back to yfinance", ticker, exc
+            )
+        try:
+            return _fetch_yfinance_bars(ticker, interval, period_days)
+        except Exception as exc:
+            logger.error("yfinance also failed for %s: %s", ticker, exc)
+            return None
+
+    else:
+        # ── Alpaca primary, yfinance fallback (default) ───────────────────────
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                return _fetch_alpaca_bars(ticker, interval, period_days)
+            except Exception as exc:
+                logger.warning(
+                    "Alpaca OHLCV attempt %d failed for %s: %s", attempt, ticker, exc
+                )
+                time.sleep(_RETRY_DELAY * attempt)
+
+        logger.warning("Falling back to yfinance for %s", ticker)
+        try:
+            return _fetch_yfinance_bars(ticker, interval, period_days)
+        except Exception as exc:
+            logger.error("yfinance also failed for %s: %s", ticker, exc)
+            return None
+
+
+def _fetch_webull_bars(ticker: str, interval: str,
+                       period_days: int) -> pd.DataFrame:
+    """
+    Fetch OHLCV bars from the Webull Developer API.
+
+    Supported intervals: "1Hour", "4Hour", "1Day", "1Week".
+    Sub-hourly intervals (e.g. "5Min") are not supported by the Webull bar
+    endpoint — callers should fall back to yfinance for those.
+
+    Raises ValueError if the result is None or empty.
+    """
+    from data.webull_client import get_webull_client
+
+    end_dt   = datetime.utcnow()
+    start_dt = end_dt - timedelta(days=period_days)
+
+    client = get_webull_client()
+    df = client.get_bars(
+        symbol=ticker,
+        interval=interval,
+        start_dt=start_dt,
+        end_dt=end_dt,
+    )
+    if df is None or df.empty:
+        raise ValueError(f"Webull get_bars returned empty for {ticker} {interval}")
+    logger.debug("Webull bars fetched: %s %s rows=%d", ticker, interval, len(df))
+    return df
 
 
 def _fetch_alpaca_bars(ticker: str, interval: str,
@@ -129,23 +195,46 @@ def fetch_weekly_ohlcv(ticker: str, lookback_weeks: int = 52) -> Optional[pd.Dat
 def fetch_4h_ohlcv(ticker: str, lookback_days: int = 30) -> Optional[pd.DataFrame]:
     """
     Fetch 4-hour bars for intermediate order block confirmation.
-    Alpaca: native 4H bars.
-    yfinance fallback: fetch 1H bars and resample to 4H.
-    """
-    for attempt in range(1, _MAX_RETRIES + 1):
-        try:
-            return _fetch_alpaca_bars(ticker, "4Hour", lookback_days)
-        except Exception as exc:
-            logger.warning("Alpaca 4H attempt %d failed for %s: %s",
-                           attempt, ticker, exc)
-            time.sleep(_RETRY_DELAY * attempt)
 
-    logger.warning("Falling back to yfinance 1H→4H resample for %s", ticker)
-    try:
-        return _fetch_yfinance_4h(ticker, lookback_days)
-    except Exception as exc:
-        logger.error("4H fetch failed entirely for %s: %s", ticker, exc)
-        return None
+    When BROKER=webull: tries Webull first, falls back to yfinance 1H→4H resample.
+    When BROKER=alpaca (default): tries Alpaca native 4H bars, falls back to
+    yfinance 1H→4H resample.
+    """
+    broker = _get_broker()
+
+    if broker == "webull":
+        try:
+            df = _fetch_webull_bars(ticker, "4Hour", lookback_days)
+            if df is not None and not df.empty:
+                return df
+            raise ValueError("Empty Webull 4H bars")
+        except Exception as exc:
+            logger.warning(
+                "Webull 4H failed for %s: %s — falling back to yfinance resample",
+                ticker, exc,
+            )
+        try:
+            return _fetch_yfinance_4h(ticker, lookback_days)
+        except Exception as exc:
+            logger.error("4H fetch failed entirely for %s: %s", ticker, exc)
+            return None
+
+    else:
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                return _fetch_alpaca_bars(ticker, "4Hour", lookback_days)
+            except Exception as exc:
+                logger.warning(
+                    "Alpaca 4H attempt %d failed for %s: %s", attempt, ticker, exc
+                )
+                time.sleep(_RETRY_DELAY * attempt)
+
+        logger.warning("Falling back to yfinance 1H→4H resample for %s", ticker)
+        try:
+            return _fetch_yfinance_4h(ticker, lookback_days)
+        except Exception as exc:
+            logger.error("4H fetch failed entirely for %s: %s", ticker, exc)
+            return None
 
 
 def _fetch_yfinance_4h(ticker: str, lookback_days: int) -> pd.DataFrame:
@@ -184,15 +273,87 @@ def fetch_vix() -> Optional[float]:
 
 def fetch_options_chain(ticker: str, min_dte: int = 14,
                          max_dte: int = 30) -> Optional[pd.DataFrame]:
-    try:
-        return _fetch_alpaca_options(ticker, min_dte, max_dte)
-    except Exception as exc:
-        logger.warning("Alpaca options failed for %s: %s — trying yfinance", ticker, exc)
-    try:
-        return _fetch_yfinance_options(ticker, min_dte, max_dte)
-    except Exception as exc:
-        logger.error("All options fetches failed for %s: %s", ticker, exc)
-        return None
+    """
+    Fetch the options chain for *ticker*.
+
+    When BROKER=webull: tries Webull first, falls back to yfinance (skips Alpaca).
+    When BROKER=alpaca (default): tries Alpaca first, falls back to yfinance.
+    """
+    broker = _get_broker()
+
+    if broker == "webull":
+        # ── Webull primary, yfinance fallback ─────────────────────────────────
+        try:
+            df = _fetch_webull_options(ticker, min_dte, max_dte)
+            if df is not None and not df.empty:
+                return df
+            raise ValueError("Empty Webull options chain")
+        except Exception as exc:
+            logger.warning(
+                "Webull options failed for %s: %s — trying yfinance", ticker, exc
+            )
+        try:
+            return _fetch_yfinance_options(ticker, min_dte, max_dte)
+        except Exception as exc:
+            logger.error("All options fetches failed for %s: %s", ticker, exc)
+            return None
+
+    else:
+        # ── Alpaca primary, yfinance fallback (default) ───────────────────────
+        try:
+            return _fetch_alpaca_options(ticker, min_dte, max_dte)
+        except Exception as exc:
+            logger.warning(
+                "Alpaca options failed for %s: %s — trying yfinance", ticker, exc
+            )
+        try:
+            return _fetch_yfinance_options(ticker, min_dte, max_dte)
+        except Exception as exc:
+            logger.error("All options fetches failed for %s: %s", ticker, exc)
+            return None
+
+
+def _fetch_webull_options(ticker: str, min_dte: int,
+                           max_dte: int) -> pd.DataFrame:
+    """
+    Fetch options chain from the Webull Developer API and filter by DTE.
+
+    Calls get_webull_client().get_option_chain() with an expiry window derived
+    from min_dte / max_dte, then filters rows so only contracts within
+    [min_dte, max_dte] are returned.
+
+    Raises ValueError if the result is None or empty after filtering.
+    """
+    from data.webull_client import get_webull_client
+
+    today     = date.today()
+    exp_start = (today + timedelta(days=min_dte)).isoformat()
+    exp_end   = (today + timedelta(days=max_dte)).isoformat()
+
+    client = get_webull_client()
+    df = client.get_option_chain(
+        symbol=ticker,
+        exp_date_from=exp_start,
+        exp_date_to=exp_end,
+    )
+    if df is None or df.empty:
+        raise ValueError(f"Webull get_option_chain returned empty for {ticker}")
+
+    # Filter to requested DTE range (API may return extras)
+    if "dte" in df.columns:
+        df = df[(df["dte"] >= min_dte) & (df["dte"] <= max_dte)].copy()
+
+    if df.empty:
+        raise ValueError(
+            f"Webull options for {ticker} empty after DTE filter "
+            f"[{min_dte}, {max_dte}]"
+        )
+
+    logger.debug(
+        "Webull options fetched: %s rows=%d dte=[%d,%d]",
+        ticker, len(df), min_dte, max_dte,
+    )
+    return df
 
 
 def _fetch_alpaca_options(ticker: str, min_dte: int,

@@ -11,7 +11,8 @@ from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "snipebot.db")
+_DATA_DIR = os.getenv("SNIPEBOT_DATA_DIR", os.path.dirname(os.path.dirname(__file__)))
+DB_PATH = os.path.join(_DATA_DIR, "snipebot.db")
 
 
 def get_connection() -> sqlite3.Connection:

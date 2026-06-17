@@ -1,0 +1,46 @@
+# fly.toml — SnipeBot deployment config for Fly.io
+#
+# IMPORTANT: Change `app` to your actual Fly.io app name before deploying.
+#   fly launch --name my-snipebot --no-deploy
+# Then run: fly deploy
+
+# ── App identity ──────────────────────────────────────────────────────────────
+app = "snipebot"
+
+# Chicago (ORD) is the closest Fly.io region to NYSE/NASDAQ data centers in
+# Mahwah NJ and Carteret NJ, minimising market-data round-trip latency.
+primary_region = "ord"
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+# We ship our own Dockerfile so no Fly buildpack is needed.
+[build]
+
+# ── Runtime environment variables ─────────────────────────────────────────────
+# Non-secret config goes here. Secrets (API keys, Discord token, broker creds)
+# must be set via: fly secrets set KEY=value
+[env]
+  PYTHONUNBUFFERED = "1"
+  SNIPEBOT_DATA_DIR = "/data"
+
+# ── Persistent volume ─────────────────────────────────────────────────────────
+# Stores snipebot.db (SQLite) and logs/ across deploys and restarts.
+# Create the volume once before first deploy:
+#   fly volumes create snipebot_data --region ord --size 1
+[[mounts]]
+  source      = "snipebot_data"
+  destination = "/data"
+
+# ── VM sizing ─────────────────────────────────────────────────────────────────
+# 1 GB RAM is sufficient for scikit-learn inference + APScheduler overhead.
+# Upgrade to dedicated-cpu-1x if torch inference causes CPU throttling.
+[[vm]]
+  memory   = "1gb"
+  cpu_kind = "shared"
+  cpus     = 1
+
+# ── Process definition ────────────────────────────────────────────────────────
+# Declares a single "worker" process. Fly will run this instead of the default
+# web process. There is intentionally NO [http_service] section — SnipeBot is
+# a background worker and must not expose any HTTP port.
+[processes]
+  worker = "python main.py"
