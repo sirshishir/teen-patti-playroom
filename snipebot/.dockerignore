@@ -1,0 +1,46 @@
+# ── CRITICAL: never bake secrets into the image ───────────────────────────────
+.env
+.env.*
+
+# ── Python bytecode ───────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── Version control ───────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env/
+
+# ── Data files (use the /data volume instead) ─────────────────────────────────
+*.db
+*.log
+logs/
+
+# ── ML model artefacts (regenerated at runtime by the weekly learner) ─────────
+models/*.pkl
+models/*.joblib
+
+# ── Test / CI artefacts ───────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Docs ──────────────────────────────────────────────────────────────────────
+README.md

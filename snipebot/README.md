@@ -1,610 +1,474 @@
-# SnipeBot — AI Options Trading Bot
+# SnipeBot — Self-Learning AI Options Trading Bot
 
-A self-learning AI options trading bot that paper trades GOOGL, MSFT, TSLA, AAPL, and SPY. Runs 24/7 on a Mac Mini, learns from every trade, and notifies you via Discord.
-
-**Paper trading only by default.** Switching to live requires a manual `.env` change — the bot will never do it automatically.
+SnipeBot is an automated options trading bot that uses **Smart Money Concepts (SMC/ICT)** technical analysis combined with a **self-learning Random Forest** AI model. It scans 5 tickers every 30 minutes across a 4-timeframe stack (Weekly → Daily → 4H → 1H), fires precise entry signals, manages positions with adaptive exits, and sends rich Discord notifications.
 
 ---
 
-## Table of Contents
+## Features
 
-1. [Prerequisites](#1-prerequisites)
-2. [Get Your Alpaca API Keys](#2-get-your-alpaca-api-keys)
-3. [Get Your Discord Webhook URL](#3-get-your-discord-webhook-url)
-4. [Clone and Install](#4-clone-and-install)
-5. [Configure Environment Variables](#5-configure-environment-variables)
-6. [Review config.yaml](#6-review-configyaml)
-7. [Run Manually (Test)](#7-run-manually-test)
-8. [Deploy with macOS launchd (24/7)](#8-deploy-with-macos-launchd-247)
-9. [File Structure](#9-file-structure)
-10. [How the Bot Works](#10-how-the-bot-works)
-11. [Self-Learning Engine](#11-self-learning-engine)
-12. [Monitoring and Logs](#12-monitoring-and-logs)
-13. [Going Live (When Ready)](#13-going-live-when-ready)
-14. [Stopping and Halting](#14-stopping-and-halting)
-15. [Troubleshooting](#15-troubleshooting)
+### Trading Strategy — Smart Money Concepts (SMC/ICT)
+- **Multi-timeframe analysis**: Weekly macro bias → Daily structure → 4H order blocks → 1H entry trigger
+- **Market structure**: Detects BOS (Break of Structure) and CHOCH (Change of Character) via swing-point analysis
+- **Liquidity zones**: Identifies equal highs/lows and sweep events that signal institutional positioning
+- **Order blocks**: Detects unmitigated bullish/bearish order blocks on Daily and 4H timeframes
+- **Fibonacci retracement**: Requires price to be in the 0.618–0.786 golden zone before entry
+- **12-condition entry gate**: All conditions must be satisfied simultaneously — weekly bias, daily structure, liquidity sweep, Fibonacci zone, order block confluence, RVOL ≥ 1.5×, ATR expansion, session timing, AI confidence, earnings buffer, VIX filter, end-of-day gate
 
----
+### Options Selection
+- Targets **14–30 DTE** options (appropriate horizon for SMC swing setups)
+- Selects nearest at-the-money contract
+- Take profit: **+40%** | Stop loss: **-25%** | Trailing stop: activates at +20%, trails 10%
 
-## 1. Prerequisites
+### AI Confidence Model
+- **Cold start (< 50 trades)**: Rule-based weighted score (structure 25%, Fibonacci 25%, OB 20%, RVOL 15%, ATR 10%, 4H confluence 5%)
+- **Post cold-start**: Random Forest classifier trained on all historical trades
+- **Auto-retrains** every Sunday via the weekly learning loop
 
-| Requirement | Version | Notes |
-|-------------|---------|-------|
-| macOS | 12+ | Apple Silicon (M1/M2/M3) or Intel |
-| Python | 3.11+ | Install via [python.org](https://www.python.org/downloads/) or `brew install python@3.11` |
-| Homebrew | Any | Optional but recommended — [brew.sh](https://brew.sh) |
-| Alpaca account | — | Free paper trading account |
-| Discord server | — | Any server where you have permission to add webhooks |
+### Self-Learning (Weekly, Sunday 8 PM ET)
+- Win rate < 45% → tighten Fibonacci entry zone
+- Average loss > 1.5× average win → tighten stop loss
+- Per-ticker win rate < 40% over 20+ trades → reduce position size 25%
+- High-VIX win rate < 35% → raise VIX max threshold
+- Sustained win rate > 65% → loosen Fibonacci zone
 
-Check your Python version:
-```bash
-python3 --version
-```
+### Risk Management
+- Max $200 per position
+- Max $300 daily loss (trading halts automatically)
+- Per-ticker position size adjustable by the learner
+- Earnings buffer: skips entry within 5 days of earnings
 
----
+### Broker Support
+- **Alpaca** (default): paper and live, full options chain
+- **Webull** (optional): set `BROKER=webull` in `.env` — routes all orders, data, and options chain through the Webull Developer API
+- **yfinance**: universal fallback for market data when the primary broker is unavailable
 
-## 2. Get Your Alpaca API Keys
-
-Alpaca provides free paper trading accounts with full options support.
-
-### Step 1 — Create an Alpaca Account
-
-1. Go to [alpaca.markets](https://alpaca.markets) and click **Get Started**
-2. Sign up with your email address
-3. Verify your email
-
-### Step 2 — Generate Paper Trading API Keys
-
-1. Log in to your Alpaca dashboard
-2. In the left sidebar, click **Paper Trading** (make sure you're NOT on Live Trading)
-3. Click the **API Keys** tab (or navigate to [app.alpaca.markets/paper-trading/overview](https://app.alpaca.markets/paper-trading/overview))
-4. Click **Generate New Key**
-5. Copy both values immediately — the secret key is only shown once:
-   - **API Key ID** → this is your `ALPACA_API_KEY`
-   - **Secret Key** → this is your `ALPACA_SECRET_KEY`
-6. Store them somewhere safe temporarily (you'll paste them into `.env` in Step 5)
-
-> **Paper trading base URL:** `https://paper-api.alpaca.markets`  
-> **Live trading base URL:** `https://api.alpaca.markets` (do NOT use this until you're ready)
-
-### Step 3 — Enable Options Trading (Paper)
-
-1. In the Alpaca dashboard, go to **Account → Account Settings**
-2. Under **Agreements**, look for **Options Trading Agreement** and accept it
-3. Paper trading options should now be available
+### Notifications — Discord (6 message types)
+1. Trade Entry — full signal details, TP/SL levels, AI confidence
+2. Trade Exit — PnL, exit reason, hold time
+3. Daily Report (4:15 PM ET) — trades, PnL, portfolio value, 30-day win rate
+4. Weekly Learning Update (Sunday 8 PM ET) — parameter changes, model accuracy
+5. Daily Loss Limit Hit — immediate alert when daily loss limit is reached
+6. System Alerts — bot online, data errors, 100-trade milestone
 
 ---
 
-## 3. Get Your Discord Webhook URL
+## Prerequisites
 
-Discord webhooks let the bot post messages to a channel without a bot token.
-
-### Step 1 — Open Your Discord Server
-
-1. Open Discord (desktop app or browser)
-2. Navigate to the server and channel where you want bot notifications
-   - Recommended: create a dedicated channel, e.g. `#snipebot-alerts`
-
-### Step 2 — Create the Webhook
-
-1. Right-click the channel name → **Edit Channel**
-2. Click **Integrations** in the left menu
-3. Click **Webhooks** → **New Webhook**
-4. Name it `SnipeBot` (optional — any name works)
-5. Click **Copy Webhook URL**
-6. The URL looks like:
-   ```
-   https://discord.com/api/webhooks/1234567890123456789/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-   ```
-7. Save this URL — this is your `DISCORD_WEBHOOK_URL`
+- Python 3.11+
+- A **free** [Alpaca Markets](https://alpaca.markets) account (paper trading) or live account
+- A [Discord](https://discord.com) server with a webhook URL
+- *(Optional)* A [Webull Developer](https://developer.webull.com) account for Webull broker
+- *(For cloud deployment)* [Fly.io](https://fly.io) account or Oracle Cloud Always Free account
 
 ---
 
-## 4. Clone and Install
+## Step 1 — Alpaca API Keys
 
-### Step 1 — Clone the Repository
+1. Go to [alpaca.markets](https://alpaca.markets) and sign up for a free account.
+2. In the dashboard, select **Paper Trading** (top-left toggle).
+3. Click **Generate New Keys** under **API Keys**.
+4. Copy your **API Key ID** and **Secret Key** — the secret is shown only once.
+5. Your paper trading base URL is: `https://paper-api.alpaca.markets`
+
+> To go live later, switch to the Live account tab, generate live keys, and change `ALPACA_BASE_URL` to `https://api.alpaca.markets`. **The bot will never do this automatically.**
+
+---
+
+## Step 2 — Webull Developer API Keys (optional)
+
+Only required if you set `BROKER=webull`.
+
+1. Go to [developer.webull.com](https://developer.webull.com) and register for a developer account.
+2. Create a new application to get your **App Key** and **App Secret**.
+3. Find your **Account ID** in the Webull desktop app under **Account → Account Summary**.
+4. The bot uses OAuth2 `client_credentials` grant — no user login required.
+
+> **Note**: Webull Developer API endpoints should be verified against your developer account documentation, as paths may differ between regions and API versions. The bot uses standard REST patterns with `# verify path` comments where confirmation is needed.
+
+---
+
+## Step 3 — Discord Webhook
+
+1. Open your Discord server settings → **Integrations** → **Webhooks**.
+2. Click **New Webhook**, name it (e.g., `SnipeBot`), choose a channel.
+3. Click **Copy Webhook URL**.
+
+---
+
+## Step 4 — Local Setup
 
 ```bash
+# Clone the repo and enter the snipebot directory
 git clone https://github.com/sirshishir/teen-patti-playroom.git
 cd teen-patti-playroom/snipebot
-```
 
-### Step 2 — Create a Virtual Environment
+# Create a virtual environment
+python3.11 -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
 
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-You should see `(venv)` in your terminal prompt.
-
-### Step 3 — Install Dependencies
-
-```bash
-pip install --upgrade pip
+# Install dependencies
 pip install -r requirements.txt
-```
 
-This installs all required packages including `alpaca-py`, `scikit-learn`, `apscheduler`, `discord.py`, `yfinance`, and others. It may take 2–3 minutes.
-
----
-
-## 5. Configure Environment Variables
-
-### Step 1 — Copy the Template
-
-```bash
+# Copy the secrets template and fill it in
 cp .env.template .env
+chmod 600 .env                   # restrict read access (Linux/macOS)
+nano .env                        # or use any text editor
 ```
 
-### Step 2 — Edit the `.env` File
-
-Open `.env` in any text editor:
-
-```bash
-nano .env
-```
-
-Fill in your values:
+**`.env` file contents:**
 
 ```env
-ALPACA_API_KEY=your_alpaca_api_key_here
-ALPACA_SECRET_KEY=your_alpaca_secret_key_here
+# Broker: "alpaca" (default) or "webull"
+BROKER=alpaca
+
+# Alpaca
+ALPACA_API_KEY=your_alpaca_api_key
+ALPACA_SECRET_KEY=your_alpaca_secret_key
 ALPACA_BASE_URL=https://paper-api.alpaca.markets
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your_webhook_here
+
+# Webull (only needed if BROKER=webull)
+WEBULL_APP_KEY=your_webull_app_key
+WEBULL_APP_SECRET=your_webull_app_secret
+WEBULL_ACCOUNT_ID=your_webull_account_id
+
+# Discord
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your_webhook
+
+# Paper mode — change to "live" ONLY after reviewing paper results manually
 TRADING_MODE=paper
 ```
 
-**Replace each placeholder:**
-
-| Variable | What to paste |
-|----------|--------------|
-| `ALPACA_API_KEY` | The API Key ID from Alpaca (Step 2 above) |
-| `ALPACA_SECRET_KEY` | The Secret Key from Alpaca (Step 2 above) |
-| `ALPACA_BASE_URL` | Leave as `https://paper-api.alpaca.markets` for paper trading |
-| `DISCORD_WEBHOOK_URL` | The full webhook URL from Discord (Step 3 above) |
-| `TRADING_MODE` | Leave as `paper` |
-
-Save and exit: `Ctrl+O`, `Enter`, `Ctrl+X` (for nano)
-
-### Step 3 — Protect the File
-
-```bash
-chmod 600 .env
-```
-
-This prevents other users on the machine from reading your keys.
-
-> **Never commit `.env` to git.** It is already in `.gitignore` by convention, but double-check with `git status` before any commit.
+> **Security**: Never commit `.env` to git. It is listed in `.gitignore` and `.dockerignore`.
 
 ---
 
-## 6. Review config.yaml
+## Step 5 — Configuration
 
-The `config.yaml` file controls all tunable strategy parameters. The defaults are set per the original spec and do not need to be changed before first run.
+Edit `config.yaml` to adjust strategy parameters. Key settings:
 
 ```yaml
 trading:
-  capital: 2000              # Starting capital in USD
-  max_position_size: 200     # Max $ per options position
-  max_open_positions: 3      # Max simultaneous open trades
-  max_daily_loss: 300        # Bot halts trading if daily loss hits this
+  capital: 2000.0          # Starting capital in USD
+  max_position_size: 200   # Max $ per trade
+  max_daily_loss: 300      # Daily loss halt threshold
 
 strategy:
-  rsi_oversold: 35           # RSI threshold for CALL entries
-  rsi_overbought: 65         # RSI threshold for PUT entries
-  volume_ratio_min: 1.5      # Volume must be 1.5x the 20-day average
-  vix_max: 30                # Skip trades when VIX >= 30
-  min_dte: 14                # Minimum days to expiration
-  max_dte: 30                # Maximum days to expiration
-  ai_confidence_min: 0.72    # Minimum AI confidence score to fire
-  take_profit_pct: 0.40      # Exit at +40% premium gain
-  stop_loss_pct: 0.25        # Exit at -25% premium loss
-
-ml:
-  cold_start_trades: 50      # Use rule-based scoring until 50 trades logged
+  fib_zone_min: 0.618      # Fibonacci entry zone lower bound
+  fib_zone_max: 0.786      # Fibonacci entry zone upper bound
+  rvol_min: 1.5            # Minimum relative volume multiplier
+  vix_max: 30              # Maximum VIX level to trade
+  min_dte: 14              # Minimum days-to-expiry
+  max_dte: 30              # Maximum days-to-expiry
+  ai_confidence_min: 0.72  # Minimum AI confidence to fire
 ```
-
-The self-learning engine will automatically adjust `rsi_oversold`, `rsi_overbought`, `stop_loss_pct`, `vix_max`, and per-ticker position sizes. You don't need to manually tune these.
 
 ---
 
-## 7. Run Manually (Test)
-
-Before setting up auto-start, verify everything works:
+## Step 6 — Running Locally
 
 ```bash
-# Make sure venv is active
+cd teen-patti-playroom/snipebot
 source venv/bin/activate
-
-# From the snipebot/ directory
 python main.py
 ```
 
-**Expected output on first run:**
-```
-HH:MM:SS [INFO] __main__: SnipeBot starting up...
-HH:MM:SS [INFO] data.database: Database initialised at /path/to/snipebot.db
-HH:MM:SS [INFO] __main__: APScheduler starting with 5 jobs
-HH:MM:SS [INFO] __main__:   Job: sr_cache | Cache S/R Zones
-HH:MM:SS [INFO] __main__:   Job: scanner | Market Scanner
-HH:MM:SS [INFO] __main__:   Job: position_monitor | Position Monitor
-HH:MM:SS [INFO] __main__:   Job: daily_report | Daily Report
-HH:MM:SS [INFO] __main__:   Job: weekly_learning | Weekly Learning
-```
+The scheduler runs:
 
-You should also see a `🟢 SnipeBot is ONLINE` message appear in your Discord channel.
+| Job | Schedule | Description |
+|-----|----------|-------------|
+| Cache warm-up | 9:00 AM ET | Builds Weekly/Daily/4H SMC analysis per ticker |
+| Market scanner | Every 30 min (9:30 AM–3:30 PM ET) | Checks all 12 SMC conditions, fires trades |
+| Position monitor | Every 5 min (9:35 AM–3:55 PM ET) | Checks TP/SL/trailing stop |
+| Daily report | 4:15 PM ET | Sends Discord daily summary |
+| Weekly learner | Sunday 8:00 PM ET | Retrains model, adjusts parameters |
 
-Press `Ctrl+C` to stop after confirming it works.
+Logs are written to `logs/snipebot.log`. The SQLite database is at `snipebot.db`.
 
 ---
 
-## 8. Deploy with macOS launchd (24/7)
+## Step 7 — Docker
 
-`launchd` is macOS's built-in service manager. It will start SnipeBot on boot and restart it if it crashes.
-
-### Step 1 — Find Your Absolute Path
+### Build the image
 
 ```bash
-pwd
+cd teen-patti-playroom/snipebot
+docker build -t snipebot .
 ```
 
-This prints something like `/Users/yourname/teen-patti-playroom/snipebot`. Copy it.
-
-### Step 2 — Edit the plist File
+### Run locally with Docker
 
 ```bash
-nano launchd/com.snipebot.plist
+docker run -d \
+  --name snipebot \
+  --env-file .env \
+  -v snipebot_data:/data \
+  snipebot
 ```
 
-Replace **all four** occurrences of `/path/to/snipebot` with your actual path:
-
-```xml
-<string>/Users/yourname/teen-patti-playroom/snipebot/venv/bin/python</string>
-<string>/Users/yourname/teen-patti-playroom/snipebot/main.py</string>
-...
-<string>/Users/yourname/teen-patti-playroom/snipebot/logs/stdout.log</string>
-<string>/Users/yourname/teen-patti-playroom/snipebot/logs/stderr.log</string>
-...
-<string>/Users/yourname/teen-patti-playroom/snipebot</string>
-...
-<string>/usr/local/bin:/usr/bin:/bin:/Users/yourname/teen-patti-playroom/snipebot/venv/bin</string>
-```
-
-Save and exit.
-
-### Step 3 — Copy to LaunchAgents
-
+Logs:
 ```bash
-cp launchd/com.snipebot.plist ~/Library/LaunchAgents/com.snipebot.plist
-```
-
-### Step 4 — Load the Service
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.snipebot.plist
-```
-
-### Step 5 — Verify It's Running
-
-```bash
-launchctl list | grep snipebot
-```
-
-You should see a line like:
-```
-12345   0   com.snipebot
-```
-
-The middle number `0` means it's running without errors. A non-zero number is an exit code (check `logs/stderr.log` if so).
-
-### Step 6 — Check Logs
-
-```bash
-tail -f logs/snipebot.log
-```
-
-### Managing the Service
-
-```bash
-# Stop SnipeBot
-launchctl unload ~/Library/LaunchAgents/com.snipebot.plist
-
-# Start SnipeBot
-launchctl load ~/Library/LaunchAgents/com.snipebot.plist
-
-# Restart (stop then start)
-launchctl unload ~/Library/LaunchAgents/com.snipebot.plist
-launchctl load ~/Library/LaunchAgents/com.snipebot.plist
+docker logs -f snipebot
 ```
 
 ---
 
-## 9. File Structure
+## Step 8 — Deploy to Fly.io (~$5/month)
+
+Fly.io runs SnipeBot as a persistent background worker with a mounted volume for the SQLite database and logs.
+
+### 8a — Install Fly CLI
+
+```bash
+# macOS
+brew install flyctl
+
+# Linux
+curl -L https://fly.io/install.sh | sh
+
+# Authenticate
+fly auth login
+```
+
+### 8b — Create the app
+
+```bash
+cd teen-patti-playroom/snipebot
+
+# Create the app (no deploy yet)
+# Replace "my-snipebot" with any globally unique name
+fly launch --name my-snipebot --no-deploy --region ord
+```
+
+This creates a `fly.toml` linked to your account. Update `app = "snipebot"` in `fly.toml` to match your chosen name.
+
+### 8c — Create the persistent volume
+
+```bash
+# 1 GB is plenty for SQLite + logs
+fly volumes create snipebot_data --region ord --size 1
+```
+
+### 8d — Set secrets
+
+Secrets are injected as environment variables at runtime — they are **never** baked into the image.
+
+```bash
+# Required
+fly secrets set ALPACA_API_KEY=your_key
+fly secrets set ALPACA_SECRET_KEY=your_secret
+fly secrets set ALPACA_BASE_URL=https://paper-api.alpaca.markets
+fly secrets set DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/your_webhook
+fly secrets set TRADING_MODE=paper
+
+# Optional — only if BROKER=webull
+fly secrets set BROKER=webull
+fly secrets set WEBULL_APP_KEY=your_webull_key
+fly secrets set WEBULL_APP_SECRET=your_webull_secret
+fly secrets set WEBULL_ACCOUNT_ID=your_account_id
+```
+
+### 8e — Deploy
+
+```bash
+fly deploy
+```
+
+### 8f — Monitor
+
+```bash
+fly logs                   # live log stream
+fly status                 # VM health
+fly ssh console            # SSH into the container
+```
+
+### 8g — Scale down to save cost
+
+```bash
+# Pause the machine when markets are closed (e.g. weekends)
+fly scale count 0          # stop
+fly scale count 1          # restart
+```
+
+---
+
+## Step 9 — Deploy to Oracle Cloud Always Free (free forever)
+
+Oracle Cloud provides a genuinely free Always Free tier with 2 AMD VMs (1 GB RAM each) that never expire — a good alternative to Fly.io.
+
+### 9a — Create an Always Free VM
+
+1. Sign up at [cloud.oracle.com](https://cloud.oracle.com).
+2. Create a **Compute Instance** → shape **VM.Standard.E2.1.Micro** (Always Free).
+3. Choose **Ubuntu 22.04** as the OS.
+4. Download the SSH key during setup.
+
+### 9b — Connect and set up
+
+```bash
+ssh -i ~/your-key.pem ubuntu@<YOUR_VM_IP>
+
+# Install Python 3.11 and git
+sudo apt update && sudo apt install -y python3.11 python3.11-venv python3-pip git
+
+# Clone the repo
+git clone https://github.com/sirshishir/teen-patti-playroom.git
+cd teen-patti-playroom/snipebot
+
+# Set up virtualenv and install packages
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Create .env (never commit this)
+cp .env.template .env
+chmod 600 .env
+nano .env    # fill in all keys
+```
+
+### 9c — Run as a systemd service
+
+```bash
+sudo nano /etc/systemd/system/snipebot.service
+```
+
+Paste the following (update paths as needed):
+
+```ini
+[Unit]
+Description=SnipeBot AI Options Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/teen-patti-playroom/snipebot
+EnvironmentFile=/home/ubuntu/teen-patti-playroom/snipebot/.env
+ExecStart=/home/ubuntu/teen-patti-playroom/snipebot/venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable snipebot
+sudo systemctl start snipebot
+sudo systemctl status snipebot
+journalctl -u snipebot -f     # live logs
+```
+
+---
+
+## Step 10 — macOS (launchd)
+
+A launchd plist is provided at `launchd/com.snipebot.plist`. Edit the file paths to match your system, then:
+
+```bash
+cp launchd/com.snipebot.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.snipebot.plist
+launchctl start com.snipebot
+```
+
+---
+
+## Secret Management with Doppler (optional)
+
+[Doppler](https://doppler.com) provides free secret management — store all keys in Doppler and inject them at runtime instead of using `.env` files on the server.
+
+```bash
+# Install Doppler CLI
+curl -Ls https://cli.doppler.com/install.sh | sh
+
+# Link the project
+doppler login
+doppler setup
+
+# Run with Doppler-injected secrets
+doppler run -- python main.py
+
+# For systemd, replace ExecStart with:
+# ExecStart=/usr/bin/doppler run -- /path/to/venv/bin/python main.py
+```
+
+---
+
+## Project Structure
 
 ```
 snipebot/
-├── main.py                        # Entry point — starts scheduler and all jobs
-├── config.yaml                    # All tunable strategy parameters
-├── .env                           # API keys (never commit this)
-├── .env.template                  # Safe template to commit
-├── requirements.txt               # Python dependencies
-├── snipebot.db                    # SQLite database (auto-created on first run)
-├── HALT.txt                       # Create this file to pause all trading immediately
-│
+├── main.py                  # APScheduler — all 5 jobs wired here
+├── config.yaml              # Strategy and trading parameters
+├── requirements.txt         # Python dependencies
+├── .env.template            # Secrets template (copy to .env)
+├── Dockerfile               # Multi-stage Docker build
+├── fly.toml                 # Fly.io deployment config
+├── .dockerignore            # Excludes .env, venv, logs, DB
 ├── core/
-│   ├── scanner.py                 # 5-min market scanner
-│   ├── strategy.py                # Entry/exit decision logic
-│   ├── indicators.py              # RSI, MACD, volume, S/R zone detection
-│   ├── risk_manager.py            # Position sizing, daily loss limit
-│   └── order_executor.py          # Alpaca API calls
-│
-├── ml/
-│   ├── confidence_model.py        # Random Forest classifier
-│   ├── feature_engineer.py        # Feature vector builder
-│   └── learner.py                 # Weekly self-learning loop
-│
+│   ├── indicators.py        # Full SMC engine (swing points, OBs, Fibonacci, RVOL, ATR)
+│   ├── strategy.py          # 12-condition entry gate + signal builder
+│   ├── scanner.py           # 30-minute scan loop
+│   ├── risk_manager.py      # Position sizing, daily loss gate, trailing stop
+│   └── order_executor.py    # Alpaca + Webull order routing
 ├── data/
-│   ├── database.py                # SQLite interface
-│   └── market_data.py             # Fetch OHLCV, options chain, VIX
-│
+│   ├── database.py          # SQLite CRUD (trades, strategy params, daily performance)
+│   ├── market_data.py       # OHLCV, options chain, VIX, earnings; multi-broker routing
+│   └── webull_client.py     # Webull OAuth2 REST client
+├── ml/
+│   ├── confidence_model.py  # RandomForest confidence scorer
+│   ├── feature_engineer.py  # 9-feature SMC vector builder
+│   └── learner.py           # Sunday self-learning loop
 ├── notifications/
-│   └── discord_bot.py             # Discord message templates and sender
-│
+│   └── discord_bot.py       # 6 Discord message templates
 ├── reports/
-│   └── daily_report.py            # End-of-day report generator
-│
-├── models/
-│   └── confidence_model.pkl       # Trained ML model (auto-updated weekly)
-│
-├── logs/
-│   ├── snipebot.log               # Rotating log (7-day retention)
-│   ├── learning_log.txt           # Human-readable record of every learning change
-│   ├── stdout.log                 # launchd stdout
-│   └── stderr.log                 # launchd stderr
-│
-└── launchd/
-    └── com.snipebot.plist         # macOS launchd config
+│   └── daily_report.py      # 4:15 PM ET daily report
+├── launchd/
+│   └── com.snipebot.plist   # macOS launchd config
+└── models/
+    └── confidence_model.pkl # Persisted RandomForest (auto-generated)
 ```
 
 ---
 
-## 10. How the Bot Works
+## Switching to Live Trading
 
-### Scheduler (All Times US/Eastern)
+> **Read this carefully before going live.**
 
-| Job | Schedule |
-|-----|----------|
-| Cache S/R zones | Daily 9:00 AM, Mon–Fri |
-| Market scanner | Every 5 min, Mon–Fri, 9:35 AM – 3:45 PM |
-| Position monitor | Every 1 min, Mon–Fri, 9:35 AM – 3:55 PM |
-| Daily report | Daily 4:15 PM, Mon–Fri |
-| Weekly learning | Every Sunday 8:00 PM |
-
-### Entry Logic (ALL must pass simultaneously)
-
-1. Price is within an auto-detected Support/Resistance zone (±0.3% tolerance)
-2. RSI(14) < 35 for calls, or RSI(14) > 65 for puts
-3. MACD histogram has just crossed in the trade direction (bullish for calls, bearish for puts)
-4. Volume spike > 1.5× the 20-day average
-5. AI confidence score ≥ 0.72
-6. No earnings announcement within the next 5 calendar days
-7. VIX < 30
-8. Not within the last 15 minutes of the trading day
-
-### Exit Logic
-
-| Trigger | Threshold |
-|---------|-----------|
-| Take Profit | +40% on option premium |
-| Stop Loss | −25% on option premium |
-| Time Stop | Exit 1 day before expiration |
-| Trailing Stop | Once +20% reached, trail −10% from peak |
-
-### Options Selection
-
-- Buys calls or puts only (no naked selling)
-- Expiry: 14–30 DTE
-- Strike: ATM or 1 strike OTM
-- Max per position: $200
-- Max simultaneous open positions: 3
-- Max 1 trade per ticker per day
-
----
-
-## 11. Self-Learning Engine
-
-Every Sunday at 8:00 PM ET, the bot automatically:
-
-1. Pulls all trades from the last 30 days
-2. Computes win rate, avg win, avg loss, and expectancy per ticker
-3. Applies adjustment rules:
-
-| Condition | Action |
-|-----------|--------|
-| Win rate < 45% | Tighten RSI threshold by 2 points |
-| Avg loss > avg win × 1.5 | Reduce stop loss from −25% to −20% |
-| Ticker win rate < 40% over 20+ trades | Reduce that ticker's position size by 25% |
-| VIX trades consistently losing | Raise VIX threshold by 2 |
-| Win rate > 65% for 4+ weeks | Loosen RSI threshold by 1 point |
-
-4. Retrains the Random Forest model on all historical trades
-5. Logs every change with timestamp and reason to `logs/learning_log.txt`
-6. Sends a Discord Weekly Learning Update
-
-**Cold start:** For the first 50 trades, a rule-based weighted score is used instead of the ML model. After 50 trades the model trains automatically and takes over.
-
----
-
-## 12. Monitoring and Logs
-
-### Real-time log
-
-```bash
-tail -f logs/snipebot.log
-```
-
-### Learning log (what the bot changed and why)
-
-```bash
-cat logs/learning_log.txt
-```
-
-### SQLite database (direct inspection)
-
-```bash
-sqlite3 snipebot.db
-
-# Recent trades
-SELECT ticker, direction, entry_price, exit_price, pnl, outcome FROM trades ORDER BY id DESC LIMIT 20;
-
-# Win rate
-SELECT outcome, COUNT(*) FROM trades WHERE outcome IS NOT NULL GROUP BY outcome;
-
-# Current strategy params (learning overrides)
-SELECT * FROM strategy_params;
-
-# Daily performance history
-SELECT * FROM daily_performance ORDER BY date DESC LIMIT 10;
-
-.quit
-```
-
-### Discord Notifications
-
-You will receive messages for:
-- Every trade entry (🎯 SNIPE FIRED)
-- Every trade exit (✅ WIN / ❌ LOSS)
-- Daily report at 4:15 PM ET (📊)
-- Weekly learning update every Sunday (🧠)
-- Daily loss limit alert if triggered (⚠️)
-- Data error alerts if a ticker fails 3 consecutive fetches (🔴)
-- 100-trade milestone notification (📊)
-
----
-
-## 13. Going Live (When Ready)
-
-After reviewing paper trading results for 3–4 months:
-
-1. Log in to Alpaca and generate **Live Trading** API keys (separate from paper keys)
-2. Complete Alpaca's identity verification if not already done
-3. Fund your account with $2,000 via ACH transfer or wire
-4. Update `.env`:
-
-```env
-ALPACA_API_KEY=your_live_api_key
-ALPACA_SECRET_KEY=your_live_secret_key
-ALPACA_BASE_URL=https://api.alpaca.markets
-TRADING_MODE=live
-```
-
-5. Restart the bot:
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.snipebot.plist
-launchctl load ~/Library/LaunchAgents/com.snipebot.plist
-```
-
-> **The bot will never switch to live on its own.** This is a deliberate safety gate. You must change `.env` manually.
-
----
-
-## 14. Stopping and Halting
-
-### Emergency pause (without stopping the bot)
-
-Create a `HALT.txt` file in the `snipebot/` directory:
-
-```bash
-touch HALT.txt
-```
-
-The scanner will immediately skip all signal evaluation and order placement on its next cycle. Remove the file to resume:
-
-```bash
-rm HALT.txt
-```
-
-### Stop the bot entirely
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.snipebot.plist
-```
-
-### Stop and prevent auto-restart on boot
-
-```bash
-launchctl unload ~/Library/LaunchAgents/com.snipebot.plist
-rm ~/Library/LaunchAgents/com.snipebot.plist
-```
-
----
-
-## 15. Troubleshooting
-
-### Bot isn't starting
-
-```bash
-# Check launchd status
-launchctl list | grep snipebot
-
-# Check for errors
-cat logs/stderr.log
-```
-
-### Discord messages not arriving
-
-1. Verify `DISCORD_WEBHOOK_URL` in `.env` is correct and complete
-2. Test the webhook manually:
-   ```bash
-   curl -X POST -H "Content-Type: application/json" \
-     -d '{"content": "test message"}' \
-     "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+1. Complete at least **100 paper trades** and review `logs/learning_log.txt`.
+2. Verify the win rate and expectancy in Discord daily/weekly reports.
+3. Open your `.env` file and make **two manual changes**:
+   ```env
+   ALPACA_BASE_URL=https://api.alpaca.markets
+   TRADING_MODE=live
    ```
-3. Check the webhook still exists in Discord (Server Settings → Integrations → Webhooks)
+4. Restart the bot.
 
-### Alpaca API errors
-
-1. Confirm `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` are correct in `.env`
-2. Make sure you're using **paper** keys with the **paper** base URL (they are different from live keys)
-3. Check [status.alpaca.markets](https://status.alpaca.markets) for outages
-4. Paper trading keys start fresh — you may need to regenerate them if they've expired
-
-### `ModuleNotFoundError`
-
-The virtual environment is likely not active or the plist path is wrong:
-
-```bash
-# Verify venv has packages
-/path/to/snipebot/venv/bin/python -c "import alpaca; print('ok')"
-
-# Re-install if needed
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-### No trades firing
-
-This is expected behaviour — SnipeBot is intentionally patient. Check `logs/snipebot.log` for lines like:
-- `Signal candidate:` — the bot is evaluating signals
-- `in_sr_zone: False` — price not near a zone (most common reason)
-- `MACD crossover not aligned` — waiting for crossover confirmation
-
-You can lower `ai_confidence_min` in `config.yaml` temporarily to see more activity during testing.
-
-### `HALT.txt` left behind accidentally
-
-```bash
-ls HALT.txt   # check if it exists
-rm HALT.txt   # remove it
-```
+The bot will **never** switch to live mode automatically. A human must change `.env`.
 
 ---
 
-## Security Notes
+## Watchlist
 
-- `.env` contains your API keys — never share it, never commit it to git
-- Alpaca paper keys can only place paper trades — they cannot touch real money even if leaked
-- Live keys should be treated like a password; rotate them if compromised via the Alpaca dashboard
-- The bot does not store keys anywhere other than `.env` and in-memory environment variables
+The default watchlist is: `GOOGL, MSFT, TSLA, AAPL, SPY`
+
+To change it, edit the `watchlist` list in `data/market_data.py` (inside `cache_sr_zones`) and `ml/learner.py` (`_WATCHLIST`).
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `DISCORD_WEBHOOK_URL not set` | Check `.env` is in the same directory as `main.py` and `python-dotenv` is installed |
+| Alpaca `401 Unauthorized` | Double-check `ALPACA_API_KEY` and `ALPACA_SECRET_KEY`; ensure paper vs live URL matches |
+| `Empty response` for a ticker | Market may be closed or the ticker is invalid; check `ALPACA_BASE_URL` |
+| Webull `401` on startup | Verify `WEBULL_APP_KEY` and `WEBULL_APP_SECRET`; token auto-refreshes every ~23 hours |
+| Bot fires no trades | All 12 conditions must align — this is intentional. Check `logs/snipebot.log` for which condition is failing |
+| Model not retraining | Requires `ml.cold_start_trades` (default 50) closed trades in the DB |
+
+---
+
+## License
+
+This project is for educational and personal use. Options trading involves substantial risk of loss. This software does not constitute financial advice. Never risk money you cannot afford to lose.
