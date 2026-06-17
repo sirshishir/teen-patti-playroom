@@ -30,6 +30,9 @@ strategy:
   swing_lookback: 50             # Bars used for Fibonacci swing detection
   struct_swing_order: 3          # argrelextrema neighbourhood for daily swing points
 
+  # ── Near-miss tracking ────────────────────────────────────────────────────
+  near_miss_discord_threshold: 9  # Send Discord alert when >= N of 12 conditions pass but trade doesn't fire
+
   # ── Universal Filters (unchanged) ─────────────────────────────────────────
   vix_max: 30                    # Skip when VIX >= this value
   min_dte: 14                    # Minimum days to expiration

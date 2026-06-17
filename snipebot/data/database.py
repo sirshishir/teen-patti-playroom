@@ -63,6 +63,31 @@ def init_db() -> None:
         worst_trade   REAL,
         notes         TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS signal_candidates (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker               TEXT    NOT NULL,
+        direction            TEXT    NOT NULL,
+        scan_time            TEXT    NOT NULL,
+        entry_price          REAL,
+        conditions_met       INTEGER DEFAULT 0,
+        cond_weekly_bias     INTEGER DEFAULT 0,
+        cond_daily_structure INTEGER DEFAULT 0,
+        cond_liquidity_sweep INTEGER DEFAULT 0,
+        cond_fibonacci_zone  INTEGER DEFAULT 0,
+        cond_order_block     INTEGER DEFAULT 0,
+        cond_rvol            INTEGER DEFAULT 0,
+        cond_atr_expansion   INTEGER DEFAULT 0,
+        cond_session_score   INTEGER DEFAULT 0,
+        cond_ai_confidence   INTEGER DEFAULT 0,
+        cond_earnings_clear  INTEGER DEFAULT 0,
+        cond_vix_ok          INTEGER DEFAULT 0,
+        cond_not_eod         INTEGER DEFAULT 0,
+        ai_confidence_score  REAL,
+        fired                INTEGER DEFAULT 0,
+        underlying_move_pct  REAL,
+        outcome              TEXT
+    );
     """
     with get_connection() as conn:
         conn.executescript(ddl)
@@ -223,6 +248,79 @@ def get_win_rate_last_n_days(days: int) -> float:
         return 0.0
     wins = sum(1 for t in closed if t["outcome"] == "win")
     return round(wins / len(closed), 4)
+
+
+# ── Signal Candidates ─────────────────────────────────────────────────────────
+
+_COND_COLS = [
+    "cond_weekly_bias", "cond_daily_structure", "cond_liquidity_sweep",
+    "cond_fibonacci_zone", "cond_order_block", "cond_rvol", "cond_atr_expansion",
+    "cond_session_score", "cond_ai_confidence", "cond_earnings_clear",
+    "cond_vix_ok", "cond_not_eod",
+]
+
+
+def insert_signal_candidate(row: Dict[str, Any]) -> int:
+    sql = """
+    INSERT INTO signal_candidates (
+        ticker, direction, scan_time, entry_price, conditions_met,
+        cond_weekly_bias, cond_daily_structure, cond_liquidity_sweep,
+        cond_fibonacci_zone, cond_order_block, cond_rvol, cond_atr_expansion,
+        cond_session_score, cond_ai_confidence, cond_earnings_clear,
+        cond_vix_ok, cond_not_eod, ai_confidence_score, fired
+    ) VALUES (
+        :ticker, :direction, :scan_time, :entry_price, :conditions_met,
+        :cond_weekly_bias, :cond_daily_structure, :cond_liquidity_sweep,
+        :cond_fibonacci_zone, :cond_order_block, :cond_rvol, :cond_atr_expansion,
+        :cond_session_score, :cond_ai_confidence, :cond_earnings_clear,
+        :cond_vix_ok, :cond_not_eod, :ai_confidence_score, :fired
+    )
+    """
+    with get_connection() as conn:
+        cur = conn.execute(sql, row)
+        return cur.lastrowid
+
+
+def update_candidate_fired(candidate_id: int) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE signal_candidates SET fired=1 WHERE id=?", (candidate_id,))
+
+
+def update_candidate_outcome(candidate_id: int,
+                              underlying_move_pct: float, outcome: str) -> None:
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE signal_candidates SET underlying_move_pct=?, outcome=? WHERE id=?",
+            (round(underlying_move_pct, 2), outcome, candidate_id),
+        )
+
+
+def get_todays_candidates() -> List[sqlite3.Row]:
+    today = date.today().isoformat()
+    sql = "SELECT * FROM signal_candidates WHERE scan_time LIKE ? ORDER BY scan_time ASC"
+    with get_connection() as conn:
+        return conn.execute(sql, (f"{today}%",)).fetchall()
+
+
+def get_signal_candidates_last_n_days(days: int) -> List[sqlite3.Row]:
+    sql = """
+    SELECT * FROM signal_candidates
+    WHERE scan_time >= date('now', ?)
+    ORDER BY scan_time DESC
+    """
+    with get_connection() as conn:
+        return conn.execute(sql, (f"-{days} days",)).fetchall()
+
+
+def get_condition_fail_stats_last_n_days(days: int) -> Dict[str, int]:
+    """Return how many times each condition failed in the last *days* days."""
+    rows = get_signal_candidates_last_n_days(days)
+    counts: Dict[str, int] = {col: 0 for col in _COND_COLS}
+    for row in rows:
+        for col in _COND_COLS:
+            if not row[col]:
+                counts[col] += 1
+    return counts
 
 
 def get_win_rate_by_ticker(ticker: str, min_trades: int = 1) -> Optional[float]:

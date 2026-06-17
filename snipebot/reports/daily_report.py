@@ -104,5 +104,43 @@ def send_report() -> None:
     logger.info("Daily report sent: trades=%d pnl=%.2f portfolio=%.2f",
                 total, daily_pnl, portfolio_value)
 
+    # Fill in directional outcomes for today's near-miss candidates
+    _fill_candidate_outcomes()
+
     # Reset session counters for next trading day
     reset_session_stats()
+
+
+def _fill_candidate_outcomes() -> None:
+    """
+    For each un-resolved signal candidate from today, fetch the end-of-day
+    close and record whether the underlying moved in the signal's direction.
+
+    This is a directional proxy (not actual option PnL) so we can learn from
+    near-misses without having placed real trades.
+    """
+    from data import database as db
+    from data.market_data import fetch_ohlcv
+
+    candidates = db.get_todays_candidates()
+    for c in candidates:
+        if c["outcome"] is not None:
+            continue
+        entry_price = c["entry_price"]
+        if not entry_price:
+            continue
+        try:
+            df = fetch_ohlcv(c["ticker"], interval="1Day", period_days=2)
+            if df is None or df.empty:
+                continue
+            current_price = float(df["close"].iloc[-1])
+            move_pct = round((current_price - entry_price) / entry_price * 100, 2)
+            if c["direction"] == "call":
+                outcome = "would_win" if move_pct > 0.2 else "would_loss"
+            else:
+                outcome = "would_win" if move_pct < -0.2 else "would_loss"
+            db.update_candidate_outcome(c["id"], move_pct, outcome)
+            logger.debug("Candidate id=%d %s %s move=%.2f%% outcome=%s",
+                         c["id"], c["ticker"], c["direction"], move_pct, outcome)
+        except Exception as exc:
+            logger.warning("Could not fill outcome for candidate id=%d: %s", c["id"], exc)

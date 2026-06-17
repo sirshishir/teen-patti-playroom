@@ -87,94 +87,98 @@ def detect_direction(indicators: Dict[str, Any]) -> Optional[str]:
 
 # ── Entry Gate ────────────────────────────────────────────────────────────────
 
+def evaluate_conditions(indicators: Dict[str, Any],
+                         vix: float,
+                         confidence: float,
+                         direction: str,
+                         ticker: str) -> Dict[str, bool]:
+    """
+    Evaluate all 12 SMC entry conditions and return a per-condition dict.
+
+    Keys match the signal_candidates table columns (minus the 'cond_' prefix).
+    Use this whenever you need individual pass/fail visibility (scanner, near-miss
+    tracking).  Call all_entry_conditions_met() when you only need the final bool.
+    """
+    cfg = _load_config()
+    st  = cfg["strategy"]
+
+    # 1. Weekly macro bias
+    weekly_trend = indicators.get("weekly_trend", "ranging")
+    weekly_bias = (
+        (direction == "call" and weekly_trend == "uptrend") or
+        (direction == "put"  and weekly_trend == "downtrend")
+    )
+
+    # 2. Daily market structure defined (trend or CHOCH)
+    trend = indicators.get("market_structure", "ranging")
+    daily_structure = trend != "ranging" or bool(indicators.get("choch", False))
+
+    # 3. Liquidity sweep completed
+    liquidity_sweep = bool(indicators.get("liquidity_swept", False))
+
+    # 4. Price in Fibonacci 0.618–0.786 zone
+    fibonacci_zone = bool(indicators.get("in_fib_zone", False))
+
+    # 5. Price at / inside an order block
+    order_block = indicators.get("order_block_quality", 0.0) > 0
+
+    # 6. Relative volume
+    rvol_min = _get_param("rvol_min", st.get("rvol_min", 1.5))
+    rvol = indicators.get("rvol", 0.0) >= rvol_min
+
+    # 7. ATR expansion
+    atr_min = _get_param("atr_expansion_min", st.get("atr_expansion_min", 1.1))
+    atr_expansion = indicators.get("atr_expansion_ratio", 1.0) >= atr_min
+
+    # 8. Session timing
+    session_min = int(_get_param("session_score_min", st.get("session_score_min", 1)))
+    session_score = indicators.get("session_score", 0) >= session_min
+
+    # 9. AI confidence
+    conf_min = _get_param("ai_confidence_min", st.get("ai_confidence_min", 0.72))
+    ai_confidence = confidence >= conf_min
+
+    # 10. Earnings buffer
+    buffer = int(_get_param("earnings_buffer_days", st.get("earnings_buffer_days", 5)))
+    earnings_clear = not earnings_within_days(ticker, buffer)
+
+    # 11. VIX below max
+    vix_max = _get_param("vix_max", st.get("vix_max", 30))
+    vix_ok = vix is None or vix < vix_max
+
+    # 12. Not in last 15 min of trading day
+    not_eod = not _is_within_last_15_min()
+
+    return {
+        "weekly_bias":     weekly_bias,
+        "daily_structure": daily_structure,
+        "liquidity_sweep": liquidity_sweep,
+        "fibonacci_zone":  fibonacci_zone,
+        "order_block":     order_block,
+        "rvol":            rvol,
+        "atr_expansion":   atr_expansion,
+        "session_score":   session_score,
+        "ai_confidence":   ai_confidence,
+        "earnings_clear":  earnings_clear,
+        "vix_ok":          vix_ok,
+        "not_eod":         not_eod,
+    }
+
+
 def all_entry_conditions_met(indicators: Dict[str, Any],
                                vix: float,
                                confidence: float,
                                direction: str,
                                ticker: str) -> bool:
-    """
-    Return True only when every SMC entry condition passes.
-    """
-    cfg = _load_config()
-    st  = cfg["strategy"]
-
-    # 0. Hard stops
+    """Return True only when every SMC entry condition passes."""
     if halt_file_exists():
         logger.debug("HALT file present")
         return False
-    if _is_within_last_15_min():
-        logger.debug("Within last 15 min — no new entries")
+    results = evaluate_conditions(indicators, vix, confidence, direction, ticker)
+    if not all(results.values()):
+        failed = [k for k, v in results.items() if not v]
+        logger.debug("%s: failed conditions: %s", ticker, failed)
         return False
-
-    # 1. Weekly macro bias must align with direction (top-down filter)
-    weekly_trend = indicators.get("weekly_trend", "ranging")
-    if direction == "call" and weekly_trend != "uptrend":
-        logger.debug("%s: weekly bias is '%s' — no call entries", ticker, weekly_trend)
-        return False
-    if direction == "put" and weekly_trend != "downtrend":
-        logger.debug("%s: weekly bias is '%s' — no put entries", ticker, weekly_trend)
-        return False
-
-    # 2. Daily market structure must be defined (not ranging)
-    trend = indicators.get("market_structure", "ranging")
-    if trend == "ranging" and not indicators.get("choch", False):
-        logger.debug("%s: daily market structure is ranging — skip", ticker)
-        return False
-
-    # 2. Liquidity sweep must have occurred
-    if not indicators.get("liquidity_swept", False):
-        logger.debug("%s: no liquidity sweep — skip", ticker)
-        return False
-
-    # 3. Price inside Fibonacci 0.618–0.786 zone
-    if not indicators.get("in_fib_zone", False):
-        logger.debug("%s: price not in Fibonacci zone — skip", ticker)
-        return False
-
-    # 4. Price at / inside an order block (quality > 0)
-    ob_quality = indicators.get("order_block_quality", 0.0)
-    if ob_quality <= 0:
-        logger.debug("%s: no order block confluence — skip", ticker)
-        return False
-
-    # 5. Relative volume confirmation
-    rvol_min = _get_param("rvol_min", st.get("rvol_min", 1.5))
-    if indicators.get("rvol", 0.0) < rvol_min:
-        logger.debug("%s: RVOL %.2f < %.2f — skip", ticker,
-                     indicators.get("rvol", 0), rvol_min)
-        return False
-
-    # 6. ATR volatility expansion
-    atr_min = _get_param("atr_expansion_min", st.get("atr_expansion_min", 1.1))
-    if indicators.get("atr_expansion_ratio", 1.0) < atr_min:
-        logger.debug("%s: ATR not expanding (ratio=%.2f) — skip", ticker,
-                     indicators.get("atr_expansion_ratio", 1.0))
-        return False
-
-    # 7. Session timing
-    session_min = int(_get_param("session_score_min", st.get("session_score_min", 1)))
-    if indicators.get("session_score", 0) < session_min:
-        logger.debug("%s: low-activity session — skip", ticker)
-        return False
-
-    # 8. AI confidence threshold
-    conf_min = _get_param("ai_confidence_min", st.get("ai_confidence_min", 0.72))
-    if confidence < conf_min:
-        logger.debug("%s: confidence %.3f < %.3f — skip", ticker, confidence, conf_min)
-        return False
-
-    # 9. No earnings within buffer days
-    buffer = int(_get_param("earnings_buffer_days", st.get("earnings_buffer_days", 5)))
-    if earnings_within_days(ticker, buffer):
-        logger.info("%s: earnings within %d days — skip", ticker, buffer)
-        return False
-
-    # 10. VIX below max
-    vix_max = _get_param("vix_max", st.get("vix_max", 30))
-    if vix is not None and vix >= vix_max:
-        logger.debug("%s: VIX %.1f >= %.1f — skip", ticker, vix, vix_max)
-        return False
-
     return True
 
 
