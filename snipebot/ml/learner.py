@@ -124,6 +124,9 @@ def run_weekly_learning() -> None:
         if model_retrained:
             model_accuracy = confidence_model.get_model_validation_accuracy()
 
+    # ── Near-miss analysis ─────────────────────────────────────────────────────
+    nm = _near_miss_analysis()
+
     # ── Discord update ─────────────────────────────────────────────────────────
     discord_bot.send_weekly_learning_update(
         n_trades_week=stats["n"],
@@ -132,8 +135,37 @@ def run_weekly_learning() -> None:
         model_retrained=model_retrained,
         total_trades=n_total,
         model_accuracy=model_accuracy,
+        near_miss_count=nm["near_miss_count"],
+        top_failing_conditions=nm["top_failing"],
+        near_miss_win_rate=nm["win_rate"],
     )
     logger.info("Weekly learning complete. %d adjustment(s) applied.", len(changes))
+
+
+def _near_miss_analysis() -> Dict[str, Any]:
+    """Summarise last 7 days of signal candidates for the weekly report."""
+    from data import database as db
+
+    candidates  = [dict(c) for c in db.get_signal_candidates_last_n_days(7)]
+    fail_stats  = db.get_condition_fail_stats_last_n_days(7)
+    threshold   = 9
+    near_misses = [c for c in candidates if c["conditions_met"] >= threshold]
+
+    with_outcomes = [c for c in near_misses if c.get("outcome") is not None]
+    win_rate = None
+    if with_outcomes:
+        wins     = sum(1 for c in with_outcomes if c["outcome"] == "would_win")
+        win_rate = round(wins / len(with_outcomes) * 100, 1)
+
+    top_failing = sorted(fail_stats.items(), key=lambda x: x[1], reverse=True)[:3]
+    top_failing = [(k, n) for k, n in top_failing if n > 0]
+
+    return {
+        "near_miss_count": len(near_misses),
+        "total_candidates": len(candidates),
+        "top_failing":      top_failing,
+        "win_rate":         win_rate,
+    }
 
 
 # ── Adjustment helpers ────────────────────────────────────────────────────────

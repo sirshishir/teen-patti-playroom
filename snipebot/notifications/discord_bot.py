@@ -151,6 +151,54 @@ def send_daily_report(
     return _send({"content": content})
 
 
+# ── Message 3b — Near-Miss Signal ────────────────────────────────────────────
+
+_NEAR_MISS_LABELS = {
+    "weekly_bias":     "Weekly bias",
+    "daily_structure": "Daily structure",
+    "liquidity_sweep": "Liquidity sweep",
+    "fibonacci_zone":  "Fibonacci zone",
+    "order_block":     "Order block",
+    "rvol":            "RVOL",
+    "atr_expansion":   "ATR expansion",
+    "session_score":   "Session timing",
+    "ai_confidence":   "AI confidence",
+    "earnings_clear":  "Earnings clear",
+    "vix_ok":          "VIX ok",
+    "not_eod":         "Not end-of-day",
+}
+
+
+def send_near_miss_signal(
+    ticker: str,
+    direction: str,
+    conditions_met: int,
+    cond_results: Dict[str, bool],
+    indicators: Dict[str, Any],
+    confidence: float,
+    vix: float,
+) -> bool:
+    detail: Dict[str, str] = {
+        "rvol":          f"{indicators.get('rvol', 0):.1f}×",
+        "atr_expansion": f"ratio {indicators.get('atr_expansion_ratio', 0):.2f}",
+        "ai_confidence": f"{confidence * 100:.0f}%",
+        "vix_ok":        f"VIX {vix:.1f}",
+    }
+    lines = []
+    for key, label in _NEAR_MISS_LABELS.items():
+        icon   = "✅" if cond_results.get(key) else "❌"
+        suffix = f" ({detail[key]})" if key in detail and not cond_results.get(key) else ""
+        lines.append(f"{icon} {label}{suffix}")
+
+    content = (
+        f"\U0001f4ca NEAR-MISS — {ticker} {direction.upper()} ({conditions_met}/12)\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{chr(10).join(lines)}\n"
+        f"⏰ {_now_et_str()}"
+    )
+    return _send({"content": content})
+
+
 # ── Message 4 — Weekly Learning Update ───────────────────────────────────────
 
 def send_weekly_learning_update(
@@ -160,12 +208,35 @@ def send_weekly_learning_update(
     model_retrained: bool,
     total_trades: int,
     model_accuracy: Optional[float],
+    near_miss_count: int = 0,
+    top_failing_conditions: Optional[List] = None,
+    near_miss_win_rate: Optional[float] = None,
 ) -> bool:
     changes_str = (
         "\n".join(f"  • {c}" for c in changes)
         if changes else "  No changes needed"
     )
     accuracy_str = f"{model_accuracy:.1f}%" if model_accuracy is not None else "N/A"
+
+    # Near-miss section
+    if top_failing_conditions:
+        label_map = {
+            "cond_weekly_bias": "Weekly bias", "cond_daily_structure": "Daily structure",
+            "cond_liquidity_sweep": "Liquidity sweep", "cond_fibonacci_zone": "Fibonacci zone",
+            "cond_order_block": "Order block", "cond_rvol": "RVOL",
+            "cond_atr_expansion": "ATR expansion", "cond_session_score": "Session timing",
+            "cond_ai_confidence": "AI confidence", "cond_earnings_clear": "Earnings clear",
+            "cond_vix_ok": "VIX", "cond_not_eod": "End-of-day",
+        }
+        blockers = " | ".join(
+            f"{label_map.get(k, k)} ({n}×)"
+            for k, n in top_failing_conditions[:3]
+        )
+    else:
+        blockers = "N/A"
+
+    wr_str = f"{near_miss_win_rate:.1f}%" if near_miss_win_rate is not None else "N/A"
+
     content = (
         f"🧠 WEEKLY LEARNING UPDATE\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -173,7 +244,11 @@ def send_weekly_learning_update(
         f"🔧 Parameters Adjusted:\n{changes_str}\n"
         f"🤖 Model Retrained: {'Yes' if model_retrained else 'No'} "
         f"({total_trades} total trades in memory)\n"
-        f"📈 Model Accuracy: {accuracy_str} on validation set"
+        f"📈 Model Accuracy: {accuracy_str} on validation set\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 Near-Misses This Week (≥9/12): {near_miss_count}\n"
+        f"❌ Top Blockers: {blockers}\n"
+        f"📊 Near-Miss Directional Accuracy: {wr_str}"
     )
     return _send({"content": content})
 

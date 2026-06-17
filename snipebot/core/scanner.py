@@ -21,7 +21,7 @@ import yaml
 from core.indicators import compute_all_indicators
 from core.risk_manager import evaluate_and_queue, daily_loss_limit_hit
 from core.strategy import (
-    all_entry_conditions_met, detect_direction,
+    all_entry_conditions_met, evaluate_conditions, detect_direction,
     build_signal, signal_to_trade_record, halt_file_exists,
 )
 from data import database as db
@@ -123,10 +123,14 @@ def run_scan() -> None:
         _scan_avg_confidence.append(confidence)
         _scan_signals_count += 1
 
+        # ── Evaluate all 12 conditions individually ─────────────────────────
+        cond_results   = evaluate_conditions(indicators, vix, confidence, direction, ticker)
+        conditions_met = sum(1 for v in cond_results.values() if v)
+
         logger.info(
-            "Signal candidate: %s %s | struct=%s sweep=%s fib=%s OB_q=%.2f "
-            "RVOL=%.2f ATR_exp=%s sess=%d conf=%.2f",
-            ticker, direction,
+            "Signal candidate: %s %s | %d/12 conditions | struct=%s sweep=%s "
+            "fib=%s OB_q=%.2f RVOL=%.2f ATR_exp=%s sess=%d conf=%.2f",
+            ticker, direction, conditions_met,
             indicators.get("market_structure"),
             indicators.get("sweep_type"),
             indicators.get("in_fib_zone"),
@@ -137,8 +141,39 @@ def run_scan() -> None:
             confidence,
         )
 
+        # ── Record candidate to DB (every scan, regardless of outcome) ─────
+        candidate_id = db.insert_signal_candidate({
+            "ticker":               ticker,
+            "direction":            direction,
+            "scan_time":            signal_time.isoformat(),
+            "entry_price":          indicators.get("current_price"),
+            "conditions_met":       conditions_met,
+            "cond_weekly_bias":     int(cond_results["weekly_bias"]),
+            "cond_daily_structure": int(cond_results["daily_structure"]),
+            "cond_liquidity_sweep": int(cond_results["liquidity_sweep"]),
+            "cond_fibonacci_zone":  int(cond_results["fibonacci_zone"]),
+            "cond_order_block":     int(cond_results["order_block"]),
+            "cond_rvol":            int(cond_results["rvol"]),
+            "cond_atr_expansion":   int(cond_results["atr_expansion"]),
+            "cond_session_score":   int(cond_results["session_score"]),
+            "cond_ai_confidence":   int(cond_results["ai_confidence"]),
+            "cond_earnings_clear":  int(cond_results["earnings_clear"]),
+            "cond_vix_ok":          int(cond_results["vix_ok"]),
+            "cond_not_eod":         int(cond_results["not_eod"]),
+            "ai_confidence_score":  confidence,
+            "fired":                0,
+        })
+
+        # ── Near-miss Discord alert ─────────────────────────────────────────
+        near_miss_threshold = cfg["strategy"].get("near_miss_discord_threshold", 9)
+        if near_miss_threshold <= conditions_met < 12:
+            discord_bot.send_near_miss_signal(
+                ticker, direction, conditions_met, cond_results,
+                indicators, confidence, vix,
+            )
+
         # ── Full entry gate ─────────────────────────────────────────────────
-        if not all_entry_conditions_met(indicators, vix, confidence, direction, ticker):
+        if halt_file_exists() or conditions_met < 12:
             continue
 
         if db.traded_ticker_today(ticker):
@@ -173,6 +208,7 @@ def run_scan() -> None:
         # ── Record in DB ────────────────────────────────────────────────────
         record   = signal_to_trade_record(signal)
         trade_id = db.insert_trade(record)
+        db.update_candidate_fired(candidate_id)
         logger.info("Trade recorded: id=%d %s %s conf=%.2f",
                     trade_id, ticker, direction, confidence)
         _scan_fired_count += 1
