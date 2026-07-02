@@ -5,6 +5,8 @@ numpy
 scikit-learn
 scipy
 apscheduler
+pytz
+tzdata
 discord.py>=2.3
 python-dotenv
 pyyaml
