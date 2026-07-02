@@ -27,7 +27,7 @@ from core.strategy import (
 )
 from data import database as db
 from data.market_data import (
-    fetch_ohlcv, get_cached_analysis, fetch_vix,
+    fetch_ohlcv, get_cached_analysis, build_ticker_analysis, fetch_vix,
     fetch_options_chain, select_option_contract,
 )
 from ml.confidence_model import get_confidence_score
@@ -37,7 +37,6 @@ from core.order_executor import place_option_order
 logger = logging.getLogger(__name__)
 
 _ET        = pytz.timezone("US/Eastern")
-_WATCHLIST = ["GOOGL", "MSFT", "TSLA", "AAPL", "SPY"]
 _BASE_DIR  = os.path.dirname(os.path.dirname(__file__))
 
 # Per-ticker failure / pause state
@@ -91,7 +90,7 @@ def run_scan() -> None:
 
     cfg = _load_config()
 
-    for ticker in _WATCHLIST:
+    for ticker in db.get_watchlist():
         time.sleep(0.2)  # Alpaca rate-limit
 
         if _is_paused(ticker):
@@ -165,8 +164,9 @@ def run_scan() -> None:
             "fired":                0,
         })
 
-        # ── Near-miss Discord alert ─────────────────────────────────────────
-        near_miss_threshold = cfg["strategy"].get("near_miss_discord_threshold", 9)
+        # ── Near-miss Discord alert (per-ticker threshold, DB-overridable) ──
+        default_threshold = cfg["strategy"].get("near_miss_discord_threshold", 9)
+        near_miss_threshold = db.get_near_miss_threshold(ticker, default_threshold)
         if near_miss_threshold <= conditions_met < 12:
             cond_reasons = describe_conditions(indicators, vix, confidence,
                                                direction, ticker)
@@ -225,56 +225,72 @@ def run_scan() -> None:
 
 # ── On-demand analysis (read-only, no orders) ───────────────────────────────
 
-def analyze_watchlist() -> List[Dict]:
+def analyze_ticker(ticker: str, vix: float, fresh: bool = True) -> Dict:
     """
-    Run a read-only SMC analysis pass over the watchlist and return one dict
-    per ticker. Places no orders and writes nothing to the DB — used by the
-    Discord "Show Analysis" command.
+    Read-only SMC analysis for a single ticker. Places no orders and writes
+    nothing to the DB.
+
+    fresh=True  → recompute the full multi-timeframe analysis live (used by
+                  /analysis so the numbers are current, not from the 9 AM cache).
+    fresh=False → use the cached daily analysis (cheaper).
+    """
+    ticker = ticker.strip().upper()
+    try:
+        df = fetch_ohlcv(ticker, interval="1Hour", period_days=20)
+        if fresh:
+            analysis = build_ticker_analysis(ticker)
+        else:
+            analysis = get_cached_analysis(ticker)
+        if df is None or df.empty or not analysis:
+            return {"ticker": ticker, "available": False}
+
+        indicators = compute_all_indicators(df, analysis)
+        direction  = detect_direction(indicators)
+        # Fall back to the structure-implied side so we can still show a full
+        # breakdown even when there's no clean directional setup.
+        eval_dir = direction or (
+            "call" if indicators.get("market_structure") == "uptrend" else "put"
+        )
+        confidence = get_confidence_score(
+            indicators, vix, eval_dir, datetime.now(timezone.utc))
+        detailed = evaluate_conditions_detailed(
+            indicators, vix, confidence, eval_dir, ticker)
+        conds   = {k: passed for k, (passed, _r) in detailed.items()}
+        reasons = {k: reason for k, (_p, reason) in detailed.items()}
+
+        return {
+            "ticker":         ticker,
+            "available":      True,
+            "direction":      direction,           # None if no clean setup
+            "price":          indicators.get("current_price"),
+            "weekly_trend":   indicators.get("weekly_trend"),
+            "structure":      indicators.get("market_structure"),
+            "rvol":           indicators.get("rvol"),
+            "confidence":     confidence,
+            "conditions":     conds,
+            "reasons":        reasons,
+            "conditions_met": sum(1 for v in conds.values() if v),
+        }
+    except Exception as exc:
+        logger.error("analyze_ticker error for %s: %s", ticker, exc)
+        return {"ticker": ticker, "available": False}
+
+
+def analyze_watchlist(tickers: List[str] = None, fresh: bool = True) -> List[Dict]:
+    """
+    Read-only SMC analysis for a list of tickers (defaults to the dynamic
+    watchlist). Used by the Discord /analysis command.
     """
     vix = fetch_vix()
     if vix is None:
         vix = 15.0
+    if tickers is None:
+        tickers = db.get_watchlist()
 
     results: List[Dict] = []
-    for ticker in _WATCHLIST:
+    for ticker in tickers:
         time.sleep(0.2)  # rate-limit
-        try:
-            df     = fetch_ohlcv(ticker, interval="1Hour", period_days=20)
-            cached = get_cached_analysis(ticker)
-            if df is None or df.empty or not cached:
-                results.append({"ticker": ticker, "available": False})
-                continue
-
-            indicators = compute_all_indicators(df, cached)
-            direction  = detect_direction(indicators)
-            # Direction used for condition evaluation: fall back to the
-            # structure-implied side so we can still show a full breakdown.
-            eval_dir = direction or (
-                "call" if indicators.get("market_structure") == "uptrend" else "put"
-            )
-            confidence = get_confidence_score(
-                indicators, vix, eval_dir, datetime.now(timezone.utc))
-            detailed = evaluate_conditions_detailed(
-                indicators, vix, confidence, eval_dir, ticker)
-            conds   = {k: passed for k, (passed, _r) in detailed.items()}
-            reasons = {k: reason for k, (_p, reason) in detailed.items()}
-
-            results.append({
-                "ticker":         ticker,
-                "available":      True,
-                "direction":      direction,           # None if no clean setup
-                "price":          indicators.get("current_price"),
-                "weekly_trend":   indicators.get("weekly_trend"),
-                "structure":      indicators.get("market_structure"),
-                "rvol":           indicators.get("rvol"),
-                "confidence":     confidence,
-                "conditions":     conds,
-                "reasons":        reasons,
-                "conditions_met": sum(1 for v in conds.values() if v),
-            })
-        except Exception as exc:
-            logger.error("analyze_watchlist error for %s: %s", ticker, exc)
-            results.append({"ticker": ticker, "available": False})
+        results.append(analyze_ticker(ticker, vix, fresh=fresh))
     return results
 
 

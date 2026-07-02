@@ -34,6 +34,7 @@ import threading
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 logger = logging.getLogger(__name__)
@@ -74,18 +75,81 @@ def _resolve_channel(bot):
     return discord.utils.get(bot.get_all_channels(), name=_CHANNEL_NAME)
 
 
-def _build_analysis_text() -> str:
+def _build_analysis_text(tickers=None) -> str:
     """
-    Assemble the current SMC analysis report (blocking — does network I/O).
-    Imported lazily to avoid a circular import (scanner → discord_bot →
-    discord_client).
+    Assemble the current (fresh) SMC analysis report (blocking — does network
+    I/O). Imported lazily to avoid a circular import (scanner → discord_bot →
+    discord_client). If *tickers* is given, analyses just those.
     """
     try:
         from reports.analysis_snapshot import build_analysis_report
-        return build_analysis_report()
+        return build_analysis_report(tickers=tickers)
     except Exception as exc:  # never let a command crash the gateway
         logger.error("Failed to build analysis report: %s", exc)
         return f"⚠️ Could not build analysis: {exc}"
+
+
+def _add_ticker_text(ticker: str) -> str:
+    """Validate and add *ticker* to the watchlist. Returns a status message."""
+    from data import database as db
+    from data.market_data import fetch_ohlcv
+
+    ticker = ticker.strip().upper()
+    if not ticker or not ticker.isalnum():
+        return f"⚠️ '{ticker}' is not a valid ticker symbol."
+    try:
+        df = fetch_ohlcv(ticker, interval="1Day", period_days=5)
+        if df is None or df.empty:
+            return f"⚠️ Couldn't fetch data for {ticker} — not added. Check the symbol."
+        if db.add_to_watchlist(ticker):
+            return (f"✅ Added **{ticker}** to the watchlist. It will be scanned "
+                    f"every 30 min and included in /analysis.")
+        return f"ℹ️ {ticker} is already on the watchlist."
+    except Exception as exc:
+        logger.error("add ticker error for %s: %s", ticker, exc)
+        return f"⚠️ Could not add {ticker}: {exc}"
+
+
+def _config_text(ticker: Optional[str], value: int) -> str:
+    """Set the global or per-ticker near-miss alert threshold."""
+    from data import database as db
+    if not (1 <= value <= 12):
+        return "⚠️ Threshold must be between 1 and 12."
+    if ticker:
+        ticker = ticker.strip().upper()
+        db.set_ticker_near_miss_threshold(ticker, value)
+        return (f"✅ {ticker} alert threshold set to **{value}/12** — you'll get a "
+                f"near-miss alert for {ticker} at {value} or more conditions met.")
+    db.set_global_near_miss_threshold(value)
+    return (f"✅ Global alert threshold set to **{value}/12** — applies to any "
+            f"ticker without its own override.")
+
+
+def _show_config_text() -> str:
+    """Show the effective near-miss alert threshold for each watchlist ticker."""
+    from data import database as db
+    import yaml as _yaml
+
+    default = 9
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                               "config.yaml")) as f:
+            default = _yaml.safe_load(f)["strategy"].get(
+                "near_miss_discord_threshold", 9)
+    except Exception:
+        pass
+
+    glob = db.get_strategy_param("near_miss_threshold")
+    glob_val = int(glob) if glob is not None else default
+    lines = ["⚙️ ALERT CONFIG", "━━━━━━━━━━━━━━━━━━━━",
+             f"Global threshold: {glob_val}/12", ""]
+    for t in db.get_watchlist():
+        per = db.get_strategy_param(f"near_miss_threshold_{t}")
+        if per is not None:
+            lines.append(f"• {t}: {int(per)}/12 (override)")
+        else:
+            lines.append(f"• {t}: {glob_val}/12 (global)")
+    return "\n".join(lines)
 
 
 def start_bot(token: Optional[str] = None) -> bool:
@@ -139,16 +203,58 @@ def start_bot(token: Optional[str] = None) -> bool:
             logger.warning("Slash command sync failed: %s", exc)
         _ready.set()
 
+    def _wrong_channel(interaction) -> bool:
+        return _channel is not None and interaction.channel_id != _channel.id
+
     @bot.tree.command(name="analysis",
-                      description="Show SnipeBot's current SMC analysis")
-    async def analysis_cmd(interaction):
-        # Only respond in the designated channel
-        if _channel is not None and interaction.channel_id != _channel.id:
+                      description="Show fresh SMC analysis (optionally for one ticker)")
+    @app_commands.describe(ticker="Optional ticker to analyse (e.g. META) — "
+                                  "need not be on the watchlist")
+    async def analysis_cmd(interaction, ticker: Optional[str] = None):
+        if _wrong_channel(interaction):
             await interaction.response.send_message(
                 f"Please use this command in #{_CHANNEL_NAME}.", ephemeral=True)
             return
         await interaction.response.defer()
-        text = await asyncio.to_thread(_build_analysis_text)
+        tickers = [ticker.strip().upper()] if ticker else None
+        text = await asyncio.to_thread(_build_analysis_text, tickers)
+        await interaction.followup.send(text[:_MAX_LEN])
+
+    @bot.tree.command(name="add", description="Add a ticker to the watchlist")
+    @app_commands.describe(ticker="Ticker symbol to add (e.g. META)")
+    async def add_cmd(interaction, ticker: str):
+        if _wrong_channel(interaction):
+            await interaction.response.send_message(
+                f"Please use this command in #{_CHANNEL_NAME}.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        text = await asyncio.to_thread(_add_ticker_text, ticker)
+        await interaction.followup.send(text[:_MAX_LEN])
+
+    @bot.tree.command(
+        name="config",
+        description="Set near-miss alert threshold (global, or per-ticker)")
+    @app_commands.describe(
+        value="Minimum conditions met (1-12) to trigger a near-miss alert",
+        ticker="Optional ticker for a per-ticker override; omit to set global")
+    async def config_cmd(interaction, value: int, ticker: Optional[str] = None):
+        if _wrong_channel(interaction):
+            await interaction.response.send_message(
+                f"Please use this command in #{_CHANNEL_NAME}.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        text = await asyncio.to_thread(_config_text, ticker, value)
+        await interaction.followup.send(text[:_MAX_LEN])
+
+    @bot.tree.command(name="show",
+                      description="Show the alert config for each watchlist ticker")
+    async def show_cmd(interaction):
+        if _wrong_channel(interaction):
+            await interaction.response.send_message(
+                f"Please use this command in #{_CHANNEL_NAME}.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        text = await asyncio.to_thread(_show_config_text)
         await interaction.followup.send(text[:_MAX_LEN])
 
     # Only register the plain-text trigger when the privileged intent is on;

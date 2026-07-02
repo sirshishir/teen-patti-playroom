@@ -36,19 +36,25 @@ def _dir_icon(direction) -> str:
     return {"call": "🟢 CALL", "put": "🔴 PUT"}.get(direction, "⚪ —")
 
 
-def build_analysis_report() -> str:
-    """Return the formatted analysis string (blocking; does network I/O)."""
+def build_analysis_report(tickers=None) -> str:
+    """
+    Return the formatted analysis string (blocking; does network I/O).
+
+    Always computes FRESH (not from the 9 AM cache). If *tickers* is given
+    (e.g. ["META"]), analyses just those — even if not in the watchlist;
+    otherwise analyses the full watchlist.
+    """
     from core.scanner import analyze_watchlist
 
-    rows = analyze_watchlist()
+    rows = analyze_watchlist(tickers=tickers, fresh=True)
     now  = datetime.now(_ET).strftime("%Y-%m-%d %H:%M:%S ET")
 
     lines = [f"📈 CURRENT ANALYSIS — {now}", "━━━━━━━━━━━━━━━━━━━━"]
 
     available = [r for r in rows if r.get("available")]
     if not available:
-        lines.append("No analysis available yet — waiting for the 9 AM ET "
-                     "daily cache to populate. Try again after market open.")
+        lines.append("No analysis available — could not fetch data for the "
+                     "requested ticker(s). Check the symbol and try again.")
         return "\n".join(lines)
 
     # Per-ticker one-liners

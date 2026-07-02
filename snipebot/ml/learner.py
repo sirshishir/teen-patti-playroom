@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 
 _BASE_DIR     = os.path.dirname(os.path.dirname(__file__))
 _LEARNING_LOG = os.path.join(_BASE_DIR, "logs", "learning_log.txt")
-_WATCHLIST    = ["GOOGL", "MSFT", "TSLA", "AAPL", "SPY"]
 
 
 def _load_config() -> Dict:
@@ -96,7 +95,7 @@ def run_weekly_learning() -> None:
             _adjust_stop_loss(db, cfg, changes, stats["win_rate"])
 
         # Rule 3: per-ticker win rate < 40% over 20+ trades
-        for ticker in _WATCHLIST:
+        for ticker in db.get_watchlist():
             wr = db.get_win_rate_by_ticker(ticker, min_trades=20)
             if wr is not None and wr < 0.40:
                 _reduce_ticker_position_size(db, ticker, changes, wr)

@@ -468,14 +468,16 @@ def earnings_within_days(ticker: str, buffer_days: int) -> bool:
 
 # ── Daily Analysis Cache ──────────────────────────────────────────────────────
 
-def cache_sr_zones() -> None:
+def build_ticker_analysis(ticker: str) -> Optional[Dict]:
     """
-    Called once at 9:00 AM ET (scheduler-compatible name kept).
-
-    Builds the full multi-timeframe SMC analysis for every watchlist ticker:
+    Build the full multi-timeframe SMC analysis for a single ticker:
       Weekly  → macro bias (trend direction + 20-week SMA)
       Daily   → market structure, order blocks, liquidity zones, Fibonacci
       4-Hour  → intermediate order blocks for entry confluence
+
+    Returns the analysis dict, or None if daily data is unavailable. This does
+    live network fetches every call — used both by the 9 AM cache job and by
+    on-demand commands (e.g. /analysis) that need fresh, un-cached data.
     """
     from core.indicators import (
         detect_swing_points, detect_market_structure,
@@ -484,57 +486,71 @@ def cache_sr_zones() -> None:
         detect_weekly_bias,
     )
 
-    watchlist = ["GOOGL", "MSFT", "TSLA", "AAPL", "SPY"]
-    for ticker in watchlist:
+    # ── Weekly bias ────────────────────────────────────────────────────────
+    df_weekly   = fetch_weekly_ohlcv(ticker, lookback_weeks=52)
+    weekly_bias = (detect_weekly_bias(df_weekly)
+                   if df_weekly is not None and not df_weekly.empty
+                   else {"trend": "ranging"})
+    time.sleep(0.2)
+
+    # ── Daily structure ────────────────────────────────────────────────────
+    df_daily = fetch_daily_ohlcv(ticker, lookback_days=60)
+    if df_daily is None or df_daily.empty:
+        logger.warning("No daily data for %s — analysis unavailable", ticker)
+        return None
+
+    sh_idx, sl_idx  = detect_swing_points(df_daily, order=3)
+    market_struct   = detect_market_structure(df_daily, sh_idx, sl_idx)
+    liquidity_zones = detect_liquidity_zones(df_daily)
+    atr_daily       = compute_atr(df_daily, period=14)
+    order_blocks    = detect_order_blocks(df_daily, sh_idx, sl_idx, atr_daily)
+    fib             = compute_fibonacci_levels(df_daily, sh_idx, sl_idx, market_struct)
+    time.sleep(0.2)
+
+    # ── 4-Hour order blocks ──────────────────────────────────────────────────
+    df_4h  = fetch_4h_ohlcv(ticker, lookback_days=30)
+    ob_4h  = []
+    if df_4h is not None and len(df_4h) >= 10:
+        sh_4h, sl_4h = detect_swing_points(df_4h, order=2)
+        atr_4h       = compute_atr(df_4h, period=14)
+        ob_4h        = detect_order_blocks(df_4h, sh_4h, sl_4h, atr_4h)
+    time.sleep(0.2)
+
+    return {
+        "weekly_bias":      weekly_bias,
+        "market_structure": market_struct,
+        "order_blocks":     order_blocks,
+        "liquidity_zones":  liquidity_zones,
+        "fibonacci":        fib,
+        "ob_4h":            ob_4h,
+    }
+
+
+def cache_sr_zones() -> None:
+    """
+    Called once at 9:00 AM ET (scheduler-compatible name kept).
+
+    Builds and caches the full multi-timeframe SMC analysis for every ticker in
+    the (dynamic) watchlist so the 30-minute scanner can reuse it cheaply.
+    """
+    from data import database as db
+
+    for ticker in db.get_watchlist():
         try:
-            # ── Weekly bias ────────────────────────────────────────────────
-            df_weekly   = fetch_weekly_ohlcv(ticker, lookback_weeks=52)
-            weekly_bias = (detect_weekly_bias(df_weekly)
-                           if df_weekly is not None and not df_weekly.empty
-                           else {"trend": "ranging"})
-            time.sleep(0.2)
-
-            # ── Daily structure ────────────────────────────────────────────
-            df_daily = fetch_daily_ohlcv(ticker, lookback_days=60)
-            if df_daily is None or df_daily.empty:
-                logger.warning("No daily data for %s — cache skipped", ticker)
+            analysis = build_ticker_analysis(ticker)
+            if analysis is None:
+                logger.warning("No analysis for %s — cache skipped", ticker)
                 continue
-
-            sh_idx, sl_idx  = detect_swing_points(df_daily, order=3)
-            market_struct   = detect_market_structure(df_daily, sh_idx, sl_idx)
-            liquidity_zones = detect_liquidity_zones(df_daily)
-            atr_daily       = compute_atr(df_daily, period=14)
-            order_blocks    = detect_order_blocks(df_daily, sh_idx, sl_idx, atr_daily)
-            fib             = compute_fibonacci_levels(df_daily, sh_idx, sl_idx,
-                                                       market_struct)
-            time.sleep(0.2)
-
-            # ── 4-Hour order blocks ────────────────────────────────────────
-            df_4h  = fetch_4h_ohlcv(ticker, lookback_days=30)
-            ob_4h  = []
-            if df_4h is not None and len(df_4h) >= 10:
-                sh_4h, sl_4h = detect_swing_points(df_4h, order=2)
-                atr_4h       = compute_atr(df_4h, period=14)
-                ob_4h        = detect_order_blocks(df_4h, sh_4h, sl_4h, atr_4h)
-            time.sleep(0.2)
-
-            _analysis_cache[ticker] = {
-                "weekly_bias":     weekly_bias,
-                "market_structure": market_struct,
-                "order_blocks":    order_blocks,
-                "liquidity_zones": liquidity_zones,
-                "fibonacci":       fib,
-                "ob_4h":           ob_4h,
-            }
+            _analysis_cache[ticker] = analysis
             logger.info(
                 "Cache built for %s: weekly=%s daily=%s "
                 "daily_OBs=%d 4H_OBs=%d liq_zones=%d",
                 ticker,
-                weekly_bias.get("trend"),
-                market_struct.get("trend"),
-                len(order_blocks), len(ob_4h), len(liquidity_zones),
+                analysis["weekly_bias"].get("trend"),
+                analysis["market_structure"].get("trend"),
+                len(analysis["order_blocks"]), len(analysis["ob_4h"]),
+                len(analysis["liquidity_zones"]),
             )
-
         except Exception as exc:
             logger.error("Cache error for %s: %s", ticker, exc)
 
