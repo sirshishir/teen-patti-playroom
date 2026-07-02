@@ -110,6 +110,15 @@ def _add_ticker_text(ticker: str) -> str:
         return f"⚠️ Could not add {ticker}: {exc}"
 
 
+def _remove_ticker_text(ticker: str) -> str:
+    """Remove *ticker* from the watchlist. Returns a status message."""
+    from data import database as db
+    ticker = ticker.strip().upper()
+    if db.remove_from_watchlist(ticker):
+        return f"✅ Removed **{ticker}** from the watchlist."
+    return f"ℹ️ {ticker} wasn't on the watchlist."
+
+
 def _config_text(ticker: Optional[str], value: int) -> str:
     """Set the global or per-ticker near-miss alert threshold."""
     from data import database as db
@@ -229,6 +238,17 @@ def start_bot(token: Optional[str] = None) -> bool:
             return
         await interaction.response.defer()
         text = await asyncio.to_thread(_add_ticker_text, ticker)
+        await interaction.followup.send(text[:_MAX_LEN])
+
+    @bot.tree.command(name="remove", description="Remove a ticker from the watchlist")
+    @app_commands.describe(ticker="Ticker symbol to remove (e.g. META)")
+    async def remove_cmd(interaction, ticker: str):
+        if _wrong_channel(interaction):
+            await interaction.response.send_message(
+                f"Please use this command in #{_CHANNEL_NAME}.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        text = await asyncio.to_thread(_remove_ticker_text, ticker)
         await interaction.followup.send(text[:_MAX_LEN])
 
     @bot.tree.command(
