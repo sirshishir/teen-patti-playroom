@@ -88,10 +88,86 @@ def init_db() -> None:
         underlying_move_pct  REAL,
         outcome              TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS watchlist (
+        ticker    TEXT PRIMARY KEY,
+        added_at  TEXT
+    );
     """
     with get_connection() as conn:
         conn.executescript(ddl)
+    _seed_watchlist()
     logger.info("Database initialised at %s", DB_PATH)
+
+
+# ── Watchlist ─────────────────────────────────────────────────────────────────
+
+_DEFAULT_WATCHLIST = ["GOOGL", "MSFT", "TSLA", "AAPL", "SPY"]
+
+
+def _seed_watchlist() -> None:
+    """Populate the watchlist with defaults on first run (if empty)."""
+    with get_connection() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
+        if n == 0:
+            now = datetime.utcnow().isoformat()
+            conn.executemany(
+                "INSERT INTO watchlist (ticker, added_at) VALUES (?, ?)",
+                [(t, now) for t in _DEFAULT_WATCHLIST],
+            )
+            logger.info("Seeded watchlist with defaults: %s", _DEFAULT_WATCHLIST)
+
+
+def get_watchlist() -> List[str]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT ticker FROM watchlist ORDER BY added_at ASC"
+        ).fetchall()
+    return [r["ticker"] for r in rows] or list(_DEFAULT_WATCHLIST)
+
+
+def add_to_watchlist(ticker: str) -> bool:
+    """Add *ticker* (upper-cased). Returns False if it was already present."""
+    ticker = ticker.strip().upper()
+    now = datetime.utcnow().isoformat()
+    with get_connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM watchlist WHERE ticker=?", (ticker,)
+        ).fetchone()
+        if exists:
+            return False
+        conn.execute(
+            "INSERT INTO watchlist (ticker, added_at) VALUES (?, ?)", (ticker, now)
+        )
+    return True
+
+
+def remove_from_watchlist(ticker: str) -> bool:
+    ticker = ticker.strip().upper()
+    with get_connection() as conn:
+        cur = conn.execute("DELETE FROM watchlist WHERE ticker=?", (ticker,))
+    return cur.rowcount > 0
+
+
+# ── Near-miss alert thresholds (stored in strategy_params) ─────────────────────
+
+def set_global_near_miss_threshold(value: int) -> None:
+    upsert_strategy_param("near_miss_threshold", float(value))
+
+
+def set_ticker_near_miss_threshold(ticker: str, value: int) -> None:
+    upsert_strategy_param(f"near_miss_threshold_{ticker.strip().upper()}", float(value))
+
+
+def get_near_miss_threshold(ticker: str, default: int) -> int:
+    """Effective threshold for *ticker*: per-ticker override → global → default."""
+    per = get_strategy_param(f"near_miss_threshold_{ticker.strip().upper()}")
+    if per is not None:
+        return int(per)
+    glob = get_strategy_param("near_miss_threshold")
+    if glob is not None:
+        return int(glob)
+    return int(default)
 
 
 # ── Trades ────────────────────────────────────────────────────────────────────

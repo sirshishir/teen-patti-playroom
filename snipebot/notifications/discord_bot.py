@@ -302,7 +302,11 @@ def send_system_alert(alert_type: str, ticker: str,
         )
     elif alert_type == "online":
         mode = extra.get("mode", "PAPER")
-        watchlist = "GOOGL, MSFT, TSLA, AAPL, SPY"
+        try:
+            from data import database as db
+            watchlist = ", ".join(db.get_watchlist())
+        except Exception:
+            watchlist = "GOOGL, MSFT, TSLA, AAPL, SPY"
         ts = _now_et_str()
         content = (
             f"🟢 SnipeBot is ONLINE — {ts}\n"
