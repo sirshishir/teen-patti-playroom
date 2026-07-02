@@ -21,8 +21,9 @@ import yaml
 from core.indicators import compute_all_indicators
 from core.risk_manager import evaluate_and_queue, daily_loss_limit_hit
 from core.strategy import (
-    all_entry_conditions_met, evaluate_conditions, detect_direction,
-    build_signal, signal_to_trade_record, halt_file_exists,
+    all_entry_conditions_met, evaluate_conditions, describe_conditions,
+    evaluate_conditions_detailed, detect_direction, build_signal,
+    signal_to_trade_record, halt_file_exists,
 )
 from data import database as db
 from data.market_data import (
@@ -167,9 +168,11 @@ def run_scan() -> None:
         # ── Near-miss Discord alert ─────────────────────────────────────────
         near_miss_threshold = cfg["strategy"].get("near_miss_discord_threshold", 9)
         if near_miss_threshold <= conditions_met < 12:
+            cond_reasons = describe_conditions(indicators, vix, confidence,
+                                               direction, ticker)
             discord_bot.send_near_miss_signal(
                 ticker, direction, conditions_met, cond_results,
-                indicators, confidence, vix,
+                indicators, confidence, vix, cond_reasons,
             )
 
         # ── Full entry gate ─────────────────────────────────────────────────
@@ -251,7 +254,10 @@ def analyze_watchlist() -> List[Dict]:
             )
             confidence = get_confidence_score(
                 indicators, vix, eval_dir, datetime.now(timezone.utc))
-            conds = evaluate_conditions(indicators, vix, confidence, eval_dir, ticker)
+            detailed = evaluate_conditions_detailed(
+                indicators, vix, confidence, eval_dir, ticker)
+            conds   = {k: passed for k, (passed, _r) in detailed.items()}
+            reasons = {k: reason for k, (_p, reason) in detailed.items()}
 
             results.append({
                 "ticker":         ticker,
@@ -263,6 +269,7 @@ def analyze_watchlist() -> List[Dict]:
                 "rvol":           indicators.get("rvol"),
                 "confidence":     confidence,
                 "conditions":     conds,
+                "reasons":        reasons,
                 "conditions_met": sum(1 for v in conds.values() if v),
             })
         except Exception as exc:
