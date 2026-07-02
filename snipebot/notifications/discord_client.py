@@ -16,9 +16,15 @@ Thread-safety:
   asyncio.run_coroutine_threadsafe(), which is safe from any thread.
 
 Configuration (env vars):
-  DISCORD_BOT_TOKEN    — bot token from the Discord Developer Portal (required)
-  DISCORD_CHANNEL_NAME — target channel name without '#' (default: price-alert)
-  DISCORD_CHANNEL_ID   — optional explicit channel ID (overrides name lookup)
+  DISCORD_BOT_TOKEN          — bot token from the Developer Portal (required)
+  DISCORD_CHANNEL_NAME       — target channel name without '#' (default: price-alert)
+  DISCORD_CHANNEL_ID         — optional explicit channel ID (overrides name lookup)
+  DISCORD_ENABLE_TEXT_COMMAND — 'true' to enable the plain-text "show analysis"
+                                trigger. This needs the Message Content
+                                privileged intent enabled in the Developer
+                                Portal; if it's not, Discord refuses the
+                                connection. Default 'false' — the /analysis
+                                slash command works either way.
 """
 
 import asyncio
@@ -100,10 +106,17 @@ def start_bot(token: Optional[str] = None) -> bool:
                     "(will fall back to webhook if configured)")
         return False
 
+    # The /analysis slash command needs NO privileged intents, so the bot
+    # connects reliably by default. The plain-text "show analysis" trigger
+    # requires the Message Content privileged intent, which must ALSO be
+    # enabled in the Developer Portal — otherwise Discord refuses the gateway
+    # connection. It's therefore opt-in via DISCORD_ENABLE_TEXT_COMMAND=true.
+    text_command_enabled = os.getenv(
+        "DISCORD_ENABLE_TEXT_COMMAND", "false").strip().lower() in ("1", "true", "yes")
+
     intents = discord.Intents.default()
-    # message_content is a privileged intent — required for the plain-text
-    # "show analysis" trigger. Must also be enabled in the Developer Portal.
-    intents.message_content = True
+    if text_command_enabled:
+        intents.message_content = True
 
     bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
@@ -138,16 +151,19 @@ def start_bot(token: Optional[str] = None) -> bool:
         text = await asyncio.to_thread(_build_analysis_text)
         await interaction.followup.send(text[:_MAX_LEN])
 
-    @bot.event
-    async def on_message(message):
-        if message.author == bot.user:
-            return
-        in_target = _channel is not None and message.channel.id == _channel.id
-        if in_target and "show analysis" in message.content.lower():
-            async with message.channel.typing():
-                text = await asyncio.to_thread(_build_analysis_text)
-            await message.channel.send(text[:_MAX_LEN])
-        await bot.process_commands(message)
+    # Only register the plain-text trigger when the privileged intent is on;
+    # without it message.content is always empty, so the handler is useless.
+    if text_command_enabled:
+        @bot.event
+        async def on_message(message):
+            if message.author == bot.user:
+                return
+            in_target = _channel is not None and message.channel.id == _channel.id
+            if in_target and "show analysis" in message.content.lower():
+                async with message.channel.typing():
+                    text = await asyncio.to_thread(_build_analysis_text)
+                await message.channel.send(text[:_MAX_LEN])
+            await bot.process_commands(message)
 
     def _run():
         global _loop

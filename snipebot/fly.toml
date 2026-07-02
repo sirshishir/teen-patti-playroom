@@ -1,29 +1,40 @@
-# fly.toml app configuration file generated for teen-patti-playroom on 2026-07-02T05:43:43Z
+# fly.toml — SnipeBot deployment config for Fly.io
 #
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+# SnipeBot is a BACKGROUND WORKER — it has no HTTP server and exposes no ports.
+# There is intentionally NO [http_service], NO [[services]], and NO [processes]
+# section: Fly runs the Dockerfile's CMD ("python main.py") as the single
+# default process. Adding an [http_service] makes Fly health-check a port the
+# app never opens ("instance refused connection ... 0.0.0.0:8080") and restart
+# the machine in a loop.
 #
+# NOTE: `fly launch` / Fly's GitHub integration will try to regenerate this
+# file and re-add an [http_service]. Always deploy with the committed config:
+#   fly deploy                       (uses this fly.toml as-is)
+#   fly launch --no-deploy --copy-config --name teen-patti-playroom  (first time)
 
+# ── App identity ──────────────────────────────────────────────────────────────
 app = 'teen-patti-playroom'
 primary_region = 'ord'
 
+# ── Build ─────────────────────────────────────────────────────────────────────
 [build]
 
+# ── Runtime environment variables ─────────────────────────────────────────────
+# Non-secret config only. Secrets (API keys, Discord token, broker creds) must
+# be set via: fly secrets set KEY=value
 [env]
   PYTHONUNBUFFERED = '1'
   SNIPEBOT_DATA_DIR = '/data'
 
+# ── Persistent volume ─────────────────────────────────────────────────────────
+# Stores snipebot.db (SQLite) and logs/ across deploys and restarts.
+# Create it once before first deploy:
+#   fly volumes create snipebot_data --region ord --size 1
 [[mounts]]
   source = 'snipebot_data'
   destination = '/data'
 
-[http_service]
-  internal_port = 8080
-  force_https = true
-  auto_stop_machines = 'stop'
-  auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
-
+# ── VM sizing ─────────────────────────────────────────────────────────────────
 [[vm]]
   memory = '1gb'
   cpu_kind = 'shared'
