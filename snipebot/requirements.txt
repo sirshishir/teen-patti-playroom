@@ -6,7 +6,7 @@ scikit-learn
 torch
 ta
 apscheduler
-discord.py
+discord.py>=2.3
 python-dotenv
 pyyaml
 requests
