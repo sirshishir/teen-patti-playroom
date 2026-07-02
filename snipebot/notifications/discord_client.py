@@ -27,6 +27,9 @@ import os
 import threading
 from typing import Optional
 
+import discord
+from discord.ext import commands
+
 logger = logging.getLogger(__name__)
 
 _MAX_LEN = 2000  # Discord hard limit per message
@@ -62,7 +65,6 @@ def _resolve_channel(bot):
                 return ch
         except ValueError:
             logger.warning("DISCORD_CHANNEL_ID %r is not a valid integer", _CHANNEL_ID)
-    import discord
     return discord.utils.get(bot.get_all_channels(), name=_CHANNEL_NAME)
 
 
@@ -97,9 +99,6 @@ def start_bot(token: Optional[str] = None) -> bool:
         logger.info("DISCORD_BOT_TOKEN not set — gateway bot disabled "
                     "(will fall back to webhook if configured)")
         return False
-
-    import discord
-    from discord.ext import commands
 
     intents = discord.Intents.default()
     # message_content is a privileged intent — required for the plain-text
