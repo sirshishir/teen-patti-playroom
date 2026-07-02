@@ -431,9 +431,11 @@ def select_option_contract(chain: pd.DataFrame, direction: str,
 
 def is_market_open_today() -> bool:
     try:
+        from alpaca.trading.requests import GetCalendarRequest
         client    = _get_trading_client()
-        today_str = date.today().isoformat()
-        calendars = client.get_calendar(filters={"start": today_str, "end": today_str})
+        today     = date.today()
+        req       = GetCalendarRequest(start=today, end=today)
+        calendars = client.get_calendar(req)
         return len(calendars) > 0
     except Exception as exc:
         logger.error("Market calendar check failed: %s", exc)
