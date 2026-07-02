@@ -1,13 +1,27 @@
 # fly.toml — SnipeBot deployment config for Fly.io
 #
-# IMPORTANT: Change `app` to your actual Fly.io app name before deploying.
-#   fly launch --name my-snipebot --no-deploy
-# Then run: fly deploy
+# SnipeBot is a BACKGROUND WORKER — it has no HTTP server and exposes no ports.
+# There is intentionally NO [http_service], NO [[services]], and NO [processes]
+# section: Fly runs the Dockerfile's CMD ("python main.py") as the single
+# default process. Adding a service here would make Fly expect an open port and
+# fail health checks.
+#
+# First-time setup (use --copy-config so Fly uses THIS file instead of
+# scaffolding a web app):
+#   fly launch --no-deploy --copy-config --name <your-app-name>
+#   fly volumes create snipebot_data --region ord --size 1
+#   fly secrets set ALPACA_API_KEY=... ALPACA_SECRET_KEY=... DISCORD_BOT_TOKEN=...
+#   fly deploy
+#
+# Subsequent deploys:
+#   fly deploy
 
 # ── App identity ──────────────────────────────────────────────────────────────
+# App names are globally unique on Fly. Change this to your own app name; it
+# must match the --name you pass to `fly launch`.
 app = "snipebot"
 
-# Chicago (ORD) is the closest Fly.io region to NYSE/NASDAQ data centers in
+# Chicago (ORD) is the closest Fly.io region to the NYSE/NASDAQ data centers in
 # Mahwah NJ and Carteret NJ, minimising market-data round-trip latency.
 primary_region = "ord"
 
@@ -16,15 +30,15 @@ primary_region = "ord"
 [build]
 
 # ── Runtime environment variables ─────────────────────────────────────────────
-# Non-secret config goes here. Secrets (API keys, Discord token, broker creds)
-# must be set via: fly secrets set KEY=value
+# Non-secret config only. Secrets (API keys, Discord token, broker creds) must
+# be set via: fly secrets set KEY=value
 [env]
   PYTHONUNBUFFERED = "1"
   SNIPEBOT_DATA_DIR = "/data"
 
 # ── Persistent volume ─────────────────────────────────────────────────────────
 # Stores snipebot.db (SQLite) and logs/ across deploys and restarts.
-# Create the volume once before first deploy:
+# Create it once before first deploy:
 #   fly volumes create snipebot_data --region ord --size 1
 [[mounts]]
   source      = "snipebot_data"
@@ -37,10 +51,3 @@ primary_region = "ord"
   memory   = "1gb"
   cpu_kind = "shared"
   cpus     = 1
-
-# ── Process definition ────────────────────────────────────────────────────────
-# Declares a single "worker" process. Fly will run this instead of the default
-# web process. There is intentionally NO [http_service] section — SnipeBot is
-# a background worker and must not expose any HTTP port.
-[processes]
-  worker = "python main.py"
