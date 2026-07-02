@@ -220,6 +220,57 @@ def run_scan() -> None:
                 _scan_fired_count, _scan_signals_count)
 
 
+# ── On-demand analysis (read-only, no orders) ───────────────────────────────
+
+def analyze_watchlist() -> List[Dict]:
+    """
+    Run a read-only SMC analysis pass over the watchlist and return one dict
+    per ticker. Places no orders and writes nothing to the DB — used by the
+    Discord "Show Analysis" command.
+    """
+    vix = fetch_vix()
+    if vix is None:
+        vix = 15.0
+
+    results: List[Dict] = []
+    for ticker in _WATCHLIST:
+        time.sleep(0.2)  # rate-limit
+        try:
+            df     = fetch_ohlcv(ticker, interval="1Hour", period_days=20)
+            cached = get_cached_analysis(ticker)
+            if df is None or df.empty or not cached:
+                results.append({"ticker": ticker, "available": False})
+                continue
+
+            indicators = compute_all_indicators(df, cached)
+            direction  = detect_direction(indicators)
+            # Direction used for condition evaluation: fall back to the
+            # structure-implied side so we can still show a full breakdown.
+            eval_dir = direction or (
+                "call" if indicators.get("market_structure") == "uptrend" else "put"
+            )
+            confidence = get_confidence_score(
+                indicators, vix, eval_dir, datetime.now(timezone.utc))
+            conds = evaluate_conditions(indicators, vix, confidence, eval_dir, ticker)
+
+            results.append({
+                "ticker":         ticker,
+                "available":      True,
+                "direction":      direction,           # None if no clean setup
+                "price":          indicators.get("current_price"),
+                "weekly_trend":   indicators.get("weekly_trend"),
+                "structure":      indicators.get("market_structure"),
+                "rvol":           indicators.get("rvol"),
+                "confidence":     confidence,
+                "conditions":     conds,
+                "conditions_met": sum(1 for v in conds.values() if v),
+            })
+        except Exception as exc:
+            logger.error("analyze_watchlist error for %s: %s", ticker, exc)
+            results.append({"ticker": ticker, "available": False})
+    return results
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _load_config() -> Dict:

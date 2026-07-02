@@ -1,11 +1,12 @@
 """
 discord_bot.py — All Discord message templates and sender.
 
-Supports two delivery methods (auto-detected):
-  • Bot API   — set DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID
-  • Webhook   — set DISCORD_WEBHOOK_URL (fallback)
-
-If both are configured, the Bot API takes precedence.
+Delivery is handled by two layers (auto-detected, in priority order):
+  1. Gateway bot   — the persistent discord.py client in discord_client.py
+                     (set DISCORD_BOT_TOKEN; posts to #price-alert). This also
+                     powers the interactive "Show Analysis" command.
+  2. Webhook       — set DISCORD_WEBHOOK_URL (fallback if the gateway bot is
+                     not running).
 
 All six message types are defined here:
   1. Trade Entry
@@ -23,12 +24,11 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from notifications import discord_client
+
 logger = logging.getLogger(__name__)
 
 _WEBHOOK_URL_ENV = "DISCORD_WEBHOOK_URL"
-_BOT_TOKEN_ENV   = "DISCORD_BOT_TOKEN"
-_CHANNEL_ID_ENV  = "DISCORD_CHANNEL_ID"
-_API_BASE        = "https://discord.com/api/v10"
 _TIMEOUT = 10  # seconds
 
 
@@ -37,43 +37,26 @@ def _get_webhook_url() -> Optional[str]:
     return url if url else None
 
 
-def _get_bot_creds() -> Optional[tuple]:
-    token   = os.getenv(_BOT_TOKEN_ENV, "").strip()
-    channel = os.getenv(_CHANNEL_ID_ENV, "").strip()
-    if token and channel:
-        return token, channel
-    return None
-
-
 def _send(payload: Dict[str, Any]) -> bool:
     """
-    Deliver *payload* to Discord via the Bot API (if configured) or webhook.
-    Returns True on success.
+    Deliver *payload* to Discord. Prefers the live gateway bot (discord.py);
+    falls back to a webhook if the gateway isn't connected. Returns True on
+    success.
     """
-    bot = _get_bot_creds()
-    if bot:
-        token, channel_id = bot
-        try:
-            resp = requests.post(
-                f"{_API_BASE}/channels/{channel_id}/messages",
-                headers={"Authorization": f"Bot {token}"},
-                json=payload,
-                timeout=_TIMEOUT,
-            )
-            if resp.status_code in (200, 204):
-                return True
-            logger.error("Discord bot API returned %d: %s",
-                         resp.status_code, resp.text[:200])
-            return False
-        except Exception as exc:
-            logger.error("Discord bot send error: %s", exc)
-            return False
+    content = payload.get("content", "")
 
+    # 1. Live gateway bot (discord.py) — also posts strictly to #price-alert
+    if discord_client.is_running():
+        if discord_client.post(content):
+            return True
+        logger.warning("Gateway post failed — trying webhook fallback")
+
+    # 2. Webhook fallback
     url = _get_webhook_url()
     if not url:
         logger.warning(
-            "No Discord delivery configured — set DISCORD_BOT_TOKEN + "
-            "DISCORD_CHANNEL_ID, or DISCORD_WEBHOOK_URL — message not sent"
+            "No Discord delivery available — gateway bot not connected and "
+            "DISCORD_WEBHOOK_URL not set — message not sent"
         )
         return False
     try:

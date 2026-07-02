@@ -67,6 +67,7 @@ from core.risk_manager import check_open_positions, daily_loss_limit_hit
 from reports.daily_report import send_report
 from ml.learner import run_weekly_learning
 from notifications.discord_bot import announce_online
+from notifications import discord_client
 
 ET = pytz.timezone("US/Eastern")
 
@@ -179,6 +180,18 @@ def main() -> None:
 
     # Initialise database (create tables if not exist)
     db.init_db()
+
+    # Start the persistent Discord gateway bot (for #price-alert + commands).
+    # Falls back silently to webhook delivery if no bot token is configured.
+    try:
+        if discord_client.start_bot():
+            if discord_client.wait_until_ready(timeout=30):
+                logger.info("Discord gateway bot ready")
+            else:
+                logger.warning("Discord gateway bot did not become ready in 30s "
+                               "— messages will use webhook fallback until it connects")
+    except Exception as exc:
+        logger.warning("Failed to start Discord gateway bot: %s", exc)
 
     # Announce online via Discord
     try:

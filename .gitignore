@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.env
+*.db
+
 # Claude Code internal data
 .claude/
 
