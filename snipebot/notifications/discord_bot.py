@@ -1,5 +1,11 @@
 """
-discord_bot.py — All Discord message templates and webhook sender.
+discord_bot.py — All Discord message templates and sender.
+
+Supports two delivery methods (auto-detected):
+  • Bot API   — set DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID
+  • Webhook   — set DISCORD_WEBHOOK_URL (fallback)
+
+If both are configured, the Bot API takes precedence.
 
 All six message types are defined here:
   1. Trade Entry
@@ -20,6 +26,9 @@ import requests
 logger = logging.getLogger(__name__)
 
 _WEBHOOK_URL_ENV = "DISCORD_WEBHOOK_URL"
+_BOT_TOKEN_ENV   = "DISCORD_BOT_TOKEN"
+_CHANNEL_ID_ENV  = "DISCORD_CHANNEL_ID"
+_API_BASE        = "https://discord.com/api/v10"
 _TIMEOUT = 10  # seconds
 
 
@@ -28,11 +37,44 @@ def _get_webhook_url() -> Optional[str]:
     return url if url else None
 
 
+def _get_bot_creds() -> Optional[tuple]:
+    token   = os.getenv(_BOT_TOKEN_ENV, "").strip()
+    channel = os.getenv(_CHANNEL_ID_ENV, "").strip()
+    if token and channel:
+        return token, channel
+    return None
+
+
 def _send(payload: Dict[str, Any]) -> bool:
-    """POST *payload* to the Discord webhook. Returns True on success."""
+    """
+    Deliver *payload* to Discord via the Bot API (if configured) or webhook.
+    Returns True on success.
+    """
+    bot = _get_bot_creds()
+    if bot:
+        token, channel_id = bot
+        try:
+            resp = requests.post(
+                f"{_API_BASE}/channels/{channel_id}/messages",
+                headers={"Authorization": f"Bot {token}"},
+                json=payload,
+                timeout=_TIMEOUT,
+            )
+            if resp.status_code in (200, 204):
+                return True
+            logger.error("Discord bot API returned %d: %s",
+                         resp.status_code, resp.text[:200])
+            return False
+        except Exception as exc:
+            logger.error("Discord bot send error: %s", exc)
+            return False
+
     url = _get_webhook_url()
     if not url:
-        logger.warning("DISCORD_WEBHOOK_URL not set — message not sent")
+        logger.warning(
+            "No Discord delivery configured — set DISCORD_BOT_TOKEN + "
+            "DISCORD_CHANNEL_ID, or DISCORD_WEBHOOK_URL — message not sent"
+        )
         return False
     try:
         resp = requests.post(url, json=payload, timeout=_TIMEOUT)
