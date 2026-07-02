@@ -1,53 +1,31 @@
-# fly.toml — SnipeBot deployment config for Fly.io
+# fly.toml app configuration file generated for teen-patti-playroom on 2026-07-02T05:43:43Z
 #
-# SnipeBot is a BACKGROUND WORKER — it has no HTTP server and exposes no ports.
-# There is intentionally NO [http_service], NO [[services]], and NO [processes]
-# section: Fly runs the Dockerfile's CMD ("python main.py") as the single
-# default process. Adding a service here would make Fly expect an open port and
-# fail health checks.
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# First-time setup (use --copy-config so Fly uses THIS file instead of
-# scaffolding a web app):
-#   fly launch --no-deploy --copy-config --name <your-app-name>
-#   fly volumes create snipebot_data --region ord --size 1
-#   fly secrets set ALPACA_API_KEY=... ALPACA_SECRET_KEY=... DISCORD_BOT_TOKEN=...
-#   fly deploy
-#
-# Subsequent deploys:
-#   fly deploy
 
-# ── App identity ──────────────────────────────────────────────────────────────
-# App names are globally unique on Fly. Change this to your own app name; it
-# must match the --name you pass to `fly launch`.
-app = "snipebot"
+app = 'teen-patti-playroom'
+primary_region = 'ord'
 
-# Chicago (ORD) is the closest Fly.io region to the NYSE/NASDAQ data centers in
-# Mahwah NJ and Carteret NJ, minimising market-data round-trip latency.
-primary_region = "ord"
-
-# ── Build ─────────────────────────────────────────────────────────────────────
-# We ship our own Dockerfile so no Fly buildpack is needed.
 [build]
 
-# ── Runtime environment variables ─────────────────────────────────────────────
-# Non-secret config only. Secrets (API keys, Discord token, broker creds) must
-# be set via: fly secrets set KEY=value
 [env]
-  PYTHONUNBUFFERED = "1"
-  SNIPEBOT_DATA_DIR = "/data"
+  PYTHONUNBUFFERED = '1'
+  SNIPEBOT_DATA_DIR = '/data'
 
-# ── Persistent volume ─────────────────────────────────────────────────────────
-# Stores snipebot.db (SQLite) and logs/ across deploys and restarts.
-# Create it once before first deploy:
-#   fly volumes create snipebot_data --region ord --size 1
 [[mounts]]
-  source      = "snipebot_data"
-  destination = "/data"
+  source = 'snipebot_data'
+  destination = '/data'
 
-# ── VM sizing ─────────────────────────────────────────────────────────────────
-# 1 GB RAM is sufficient for scikit-learn inference + APScheduler overhead.
-# Upgrade to dedicated-cpu-1x if torch inference causes CPU throttling.
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
 [[vm]]
-  memory   = "1gb"
-  cpu_kind = "shared"
-  cpus     = 1
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 1024
