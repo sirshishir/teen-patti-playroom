@@ -68,10 +68,13 @@ def build_analysis_report() -> str:
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"🔍 Closest setup — {best['ticker']} "
                  f"({best['conditions_met']}/12):")
-    conds = best.get("conditions", {})
+    conds   = best.get("conditions", {})
+    reasons = best.get("reasons", {})
     for key, label in _COND_LABELS.items():
-        icon = "✅" if conds.get(key) else "❌"
-        lines.append(f"{icon} {label}")
+        icon   = "✅" if conds.get(key) else "❌"
+        reason = reasons.get(key)
+        suffix = f" — {reason}" if reason else ""
+        lines.append(f"{icon} {label}{suffix}")
 
     text = "\n".join(lines)
     if len(text) > 2000:

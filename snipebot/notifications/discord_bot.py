@@ -202,17 +202,14 @@ def send_near_miss_signal(
     indicators: Dict[str, Any],
     confidence: float,
     vix: float,
+    reasons: Optional[Dict[str, str]] = None,
 ) -> bool:
-    detail: Dict[str, str] = {
-        "rvol":          f"{indicators.get('rvol', 0):.1f}×",
-        "atr_expansion": f"ratio {indicators.get('atr_expansion_ratio', 0):.2f}",
-        "ai_confidence": f"{confidence * 100:.0f}%",
-        "vix_ok":        f"VIX {vix:.1f}",
-    }
+    reasons = reasons or {}
     lines = []
     for key, label in _NEAR_MISS_LABELS.items():
         icon   = "✅" if cond_results.get(key) else "❌"
-        suffix = f" ({detail[key]})" if key in detail and not cond_results.get(key) else ""
+        reason = reasons.get(key)
+        suffix = f" — {reason}" if reason else ""
         lines.append(f"{icon} {label}{suffix}")
 
     content = (

@@ -87,17 +87,18 @@ def detect_direction(indicators: Dict[str, Any]) -> Optional[str]:
 
 # ── Entry Gate ────────────────────────────────────────────────────────────────
 
-def evaluate_conditions(indicators: Dict[str, Any],
-                         vix: float,
-                         confidence: float,
-                         direction: str,
-                         ticker: str) -> Dict[str, bool]:
+def evaluate_conditions_detailed(indicators: Dict[str, Any],
+                                 vix: float,
+                                 confidence: float,
+                                 direction: str,
+                                 ticker: str) -> Dict[str, tuple]:
     """
-    Evaluate all 12 SMC entry conditions and return a per-condition dict.
+    Evaluate all 12 SMC entry conditions. Returns {condition: (passed, reason)}
+    where *reason* is a short human-readable fact explaining the pass/fail.
 
-    Keys match the signal_candidates table columns (minus the 'cond_' prefix).
-    Use this whenever you need individual pass/fail visibility (scanner, near-miss
-    tracking).  Call all_entry_conditions_met() when you only need the final bool.
+    Single source of truth — evaluate_conditions() and describe_conditions()
+    are thin wrappers over this. Call this directly when you need both the
+    bool and the reason and want to avoid evaluating twice.
     """
     cfg = _load_config()
     st  = cfg["strategy"]
@@ -108,61 +109,118 @@ def evaluate_conditions(indicators: Dict[str, Any],
         (direction == "call" and weekly_trend == "uptrend") or
         (direction == "put"  and weekly_trend == "downtrend")
     )
+    need = "uptrend" if direction == "call" else "downtrend"
+    weekly_reason = (f"weekly {weekly_trend} matches {direction}" if weekly_bias
+                     else f"weekly {weekly_trend}; {direction} needs {need}")
 
     # 2. Daily market structure defined (trend or CHOCH)
     trend = indicators.get("market_structure", "ranging")
-    daily_structure = trend != "ranging" or bool(indicators.get("choch", False))
+    choch = bool(indicators.get("choch", False))
+    daily_structure = trend != "ranging" or choch
+    daily_reason = (f"daily {trend}" + (" + CHOCH" if choch else "")
+                    if daily_structure else "daily ranging, no CHOCH")
 
     # 3. Liquidity sweep completed
     liquidity_sweep = bool(indicators.get("liquidity_swept", False))
+    sweep_type = indicators.get("sweep_type")
+    sweep_reason = (f"{sweep_type or 'liquidity'} swept" if liquidity_sweep
+                    else "no liquidity sweep")
 
     # 4. Price in Fibonacci 0.618–0.786 zone
     fibonacci_zone = bool(indicators.get("in_fib_zone", False))
+    fib_lo = st.get("fib_zone_min", 0.618)
+    fib_hi = st.get("fib_zone_max", 0.786)
+    fib_reason = (f"in {fib_lo:.3f}-{fib_hi:.3f} zone" if fibonacci_zone
+                  else f"outside {fib_lo:.3f}-{fib_hi:.3f} zone")
 
     # 5. Price at / inside an order block
-    order_block = indicators.get("order_block_quality", 0.0) > 0
+    ob_quality = indicators.get("order_block_quality", 0.0)
+    order_block = ob_quality > 0
+    ob_reason = (f"at order block (q={ob_quality:.0f})" if order_block
+                 else "not at an order block")
 
     # 6. Relative volume
     rvol_min = _get_param("rvol_min", st.get("rvol_min", 1.5))
-    rvol = indicators.get("rvol", 0.0) >= rvol_min
+    rvol_val = indicators.get("rvol", 0.0)
+    rvol = rvol_val >= rvol_min
+    rvol_reason = f"{rvol_val:.2f}x {'>=' if rvol else '<'} {rvol_min:.1f}x"
 
     # 7. ATR expansion
     atr_min = _get_param("atr_expansion_min", st.get("atr_expansion_min", 1.1))
-    atr_expansion = indicators.get("atr_expansion_ratio", 1.0) >= atr_min
+    atr_val = indicators.get("atr_expansion_ratio", 1.0)
+    atr_expansion = atr_val >= atr_min
+    atr_reason = f"ratio {atr_val:.2f} {'>=' if atr_expansion else '<'} {atr_min:.2f}"
 
     # 8. Session timing
     session_min = int(_get_param("session_score_min", st.get("session_score_min", 1)))
-    session_score = indicators.get("session_score", 0) >= session_min
+    sess_val = indicators.get("session_score", 0)
+    session_score = sess_val >= session_min
+    sess_reason = f"score {sess_val} {'>=' if session_score else '<'} {session_min}"
 
     # 9. AI confidence
     conf_min = _get_param("ai_confidence_min", st.get("ai_confidence_min", 0.72))
     ai_confidence = confidence >= conf_min
+    conf_reason = f"{confidence*100:.0f}% {'>=' if ai_confidence else '<'} {conf_min*100:.0f}%"
 
     # 10. Earnings buffer
     buffer = int(_get_param("earnings_buffer_days", st.get("earnings_buffer_days", 5)))
     earnings_clear = not earnings_within_days(ticker, buffer)
+    earnings_reason = (f"no earnings within {buffer}d" if earnings_clear
+                       else f"earnings within {buffer}d")
 
     # 11. VIX below max
     vix_max = _get_param("vix_max", st.get("vix_max", 30))
     vix_ok = vix is None or vix < vix_max
+    vix_reason = (f"VIX {vix:.1f} {'<' if vix_ok else '>='} {vix_max:.0f}"
+                  if vix is not None else "VIX unavailable")
 
     # 12. Not in last 15 min of trading day
     not_eod = not _is_within_last_15_min()
+    eod_reason = "not last 15 min" if not_eod else "within last 15 min"
 
     return {
-        "weekly_bias":     weekly_bias,
-        "daily_structure": daily_structure,
-        "liquidity_sweep": liquidity_sweep,
-        "fibonacci_zone":  fibonacci_zone,
-        "order_block":     order_block,
-        "rvol":            rvol,
-        "atr_expansion":   atr_expansion,
-        "session_score":   session_score,
-        "ai_confidence":   ai_confidence,
-        "earnings_clear":  earnings_clear,
-        "vix_ok":          vix_ok,
-        "not_eod":         not_eod,
+        "weekly_bias":     (weekly_bias,     weekly_reason),
+        "daily_structure": (daily_structure, daily_reason),
+        "liquidity_sweep": (liquidity_sweep, sweep_reason),
+        "fibonacci_zone":  (fibonacci_zone,  fib_reason),
+        "order_block":     (order_block,     ob_reason),
+        "rvol":            (rvol,            rvol_reason),
+        "atr_expansion":   (atr_expansion,   atr_reason),
+        "session_score":   (session_score,   sess_reason),
+        "ai_confidence":   (ai_confidence,   conf_reason),
+        "earnings_clear":  (earnings_clear,  earnings_reason),
+        "vix_ok":          (vix_ok,          vix_reason),
+        "not_eod":         (not_eod,         eod_reason),
     }
+
+
+def evaluate_conditions(indicators: Dict[str, Any],
+                         vix: float,
+                         confidence: float,
+                         direction: str,
+                         ticker: str) -> Dict[str, bool]:
+    """
+    Evaluate all 12 SMC entry conditions and return {condition: passed}.
+
+    Keys match the signal_candidates table columns (minus the 'cond_' prefix).
+    Use this for pass/fail visibility (scanner, near-miss tracking). Call
+    all_entry_conditions_met() when you only need the final bool, or
+    describe_conditions() when you also want the reason for each.
+    """
+    detailed = evaluate_conditions_detailed(indicators, vix, confidence,
+                                            direction, ticker)
+    return {k: passed for k, (passed, _reason) in detailed.items()}
+
+
+def describe_conditions(indicators: Dict[str, Any],
+                        vix: float,
+                        confidence: float,
+                        direction: str,
+                        ticker: str) -> Dict[str, str]:
+    """Return {condition: reason} — a short fact explaining each pass/fail."""
+    detailed = evaluate_conditions_detailed(indicators, vix, confidence,
+                                            direction, ticker)
+    return {k: reason for k, (_passed, reason) in detailed.items()}
 
 
 def all_entry_conditions_met(indicators: Dict[str, Any],
