@@ -3,12 +3,9 @@ yfinance
 pandas
 numpy
 scikit-learn
-torch
-ta
+scipy
 apscheduler
 discord.py>=2.3
 python-dotenv
 pyyaml
 requests
-matplotlib
-scipy
