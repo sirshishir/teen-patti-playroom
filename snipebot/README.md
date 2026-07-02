@@ -234,12 +234,16 @@ fly auth login
 ```bash
 cd teen-patti-playroom/snipebot
 
-# Create the app (no deploy yet)
-# Replace "my-snipebot" with any globally unique name
-fly launch --name my-snipebot --no-deploy --region ord
+# Create the app WITHOUT letting Fly scaffold a web service.
+# --copy-config reuses the committed fly.toml (a background worker with no
+# HTTP port); --name sets a globally unique app name.
+# Replace "my-snipebot" with any globally unique name.
+fly launch --no-deploy --copy-config --name my-snipebot --region ord
 ```
 
-This creates a `fly.toml` linked to your account. Update `app = "snipebot"` in `fly.toml` to match your chosen name.
+> **Important:** always pass `--copy-config`. Without it, `fly launch` tries to auto-detect a web app and injects an `[http_service]` that points at a process named `app`, which fails validation for a background worker (`Service specifies 'app' as one of its processes, but no processes are defined with that name`). The committed `fly.toml` has no `[processes]` and no service — Fly runs the Dockerfile's `CMD` (`python main.py`) as the single default process.
+
+After launch, make sure `app = "..."` in `fly.toml` matches the `--name` you chose.
 
 ### 8c — Create the persistent volume
 
