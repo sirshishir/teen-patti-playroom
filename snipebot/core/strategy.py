@@ -314,7 +314,8 @@ def build_signal(ticker: str,
 
 # ── Trade Record Builder ──────────────────────────────────────────────────────
 
-def signal_to_trade_record(signal: Dict[str, Any]) -> Dict[str, Any]:
+def signal_to_trade_record(signal: Dict[str, Any],
+                           is_seed: bool = False) -> Dict[str, Any]:
     """Convert an approved signal into a DB insert record."""
     from datetime import date
     return {
@@ -335,4 +336,5 @@ def signal_to_trade_record(signal: Dict[str, Any]) -> Dict[str, Any]:
         "ai_confidence":   signal.get("ai_confidence"),
         "market_regime":   signal.get("market_structure"),
         "outcome":         None,
+        "is_seed":         1 if is_seed else 0,
     }

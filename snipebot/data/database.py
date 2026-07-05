@@ -42,7 +42,8 @@ def init_db() -> None:
         vix_at_entry    REAL,
         ai_confidence   REAL,
         market_regime   TEXT,
-        outcome         TEXT
+        outcome         TEXT,
+        is_seed         INTEGER DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS strategy_params (
@@ -96,8 +97,18 @@ def init_db() -> None:
     """
     with get_connection() as conn:
         conn.executescript(ddl)
+    _migrate_schema()
     _seed_watchlist()
     logger.info("Database initialised at %s", DB_PATH)
+
+
+def _migrate_schema() -> None:
+    """Additive migrations for DBs created before a column existed."""
+    with get_connection() as conn:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)").fetchall()}
+        if "is_seed" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN is_seed INTEGER DEFAULT 0")
+            logger.info("Migrated: added trades.is_seed column")
 
 
 # ── Watchlist ─────────────────────────────────────────────────────────────────
@@ -173,21 +184,25 @@ def get_near_miss_threshold(ticker: str, default: int) -> int:
 # ── Trades ────────────────────────────────────────────────────────────────────
 
 def insert_trade(trade: Dict[str, Any]) -> int:
+    trade = {**trade, "is_seed": int(trade.get("is_seed", 0) or 0)}
     sql = """
     INSERT INTO trades (
         ticker, direction, entry_price, exit_price, entry_date, exit_date,
         pnl, pnl_pct, exit_reason, rsi_at_entry, macd_signal, volume_ratio,
-        sr_zone_quality, vix_at_entry, ai_confidence, market_regime, outcome
+        sr_zone_quality, vix_at_entry, ai_confidence, market_regime, outcome,
+        is_seed
     ) VALUES (
         :ticker, :direction, :entry_price, :exit_price, :entry_date, :exit_date,
         :pnl, :pnl_pct, :exit_reason, :rsi_at_entry, :macd_signal, :volume_ratio,
-        :sr_zone_quality, :vix_at_entry, :ai_confidence, :market_regime, :outcome
+        :sr_zone_quality, :vix_at_entry, :ai_confidence, :market_regime, :outcome,
+        :is_seed
     )
     """
     with get_connection() as conn:
         cur = conn.execute(sql, trade)
         trade_id = cur.lastrowid
-    logger.debug("Inserted trade id=%d ticker=%s", trade_id, trade.get("ticker"))
+    logger.debug("Inserted trade id=%d ticker=%s is_seed=%d",
+                 trade_id, trade.get("ticker"), trade["is_seed"])
     return trade_id
 
 
@@ -223,9 +238,22 @@ def get_trades_last_n_days(days: int) -> List[sqlite3.Row]:
 
 
 def get_all_closed_trades() -> List[sqlite3.Row]:
+    """All closed trades INCLUDING seed trades — used for model training (FIX-10)."""
     sql = """
     SELECT * FROM trades
     WHERE exit_date IS NOT NULL AND exit_date != ''
+    ORDER BY entry_date ASC
+    """
+    with get_connection() as conn:
+        return conn.execute(sql).fetchall()
+
+
+def get_real_closed_trades() -> List[sqlite3.Row]:
+    """Closed NON-seed trades only — used for portfolio value / real P&L."""
+    sql = """
+    SELECT * FROM trades
+    WHERE exit_date IS NOT NULL AND exit_date != ''
+      AND (is_seed IS NULL OR is_seed = 0)
     ORDER BY entry_date ASC
     """
     with get_connection() as conn:
@@ -239,15 +267,27 @@ def count_all_trades() -> int:
 
 
 def traded_ticker_today(ticker: str) -> bool:
+    """True if a REAL (non-seed) trade for *ticker* was opened today."""
     today = date.today().isoformat()
-    sql = "SELECT 1 FROM trades WHERE ticker=? AND entry_date=? LIMIT 1"
+    sql = ("SELECT 1 FROM trades WHERE ticker=? AND entry_date=? "
+           "AND (is_seed IS NULL OR is_seed = 0) LIMIT 1")
+    with get_connection() as conn:
+        return conn.execute(sql, (ticker, today)).fetchone() is not None
+
+
+def seeded_ticker_today(ticker: str) -> bool:
+    """True if a SEED trade for *ticker* was recorded today (FIX-10 dedup)."""
+    today = date.today().isoformat()
+    sql = "SELECT 1 FROM trades WHERE ticker=? AND entry_date=? AND is_seed=1 LIMIT 1"
     with get_connection() as conn:
         return conn.execute(sql, (ticker, today)).fetchone() is not None
 
 
 def get_today_closed_trades() -> List[sqlite3.Row]:
+    """Today's closed NON-seed trades (real P&L / win-loss reporting)."""
     today = date.today().isoformat()
-    sql = "SELECT * FROM trades WHERE entry_date=? AND exit_date IS NOT NULL"
+    sql = ("SELECT * FROM trades WHERE entry_date=? AND exit_date IS NOT NULL "
+           "AND (is_seed IS NULL OR is_seed = 0)")
     with get_connection() as conn:
         return conn.execute(sql, (today,)).fetchall()
 
@@ -319,7 +359,10 @@ def get_daily_performance(for_date: str) -> Optional[sqlite3.Row]:
 
 def get_win_rate_last_n_days(days: int) -> float:
     trades = get_trades_last_n_days(days)
-    closed = [t for t in trades if t["outcome"] in ("win", "loss")]
+    # Exclude seed trades from win-rate reporting (FIX-10).
+    closed = [t for t in trades
+              if t["outcome"] in ("win", "loss")
+              and (t["is_seed"] is None or t["is_seed"] == 0)]
     if not closed:
         return 0.0
     wins = sum(1 for t in closed if t["outcome"] == "win")
@@ -400,9 +443,11 @@ def get_condition_fail_stats_last_n_days(days: int) -> Dict[str, int]:
 
 
 def get_win_rate_by_ticker(ticker: str, min_trades: int = 1) -> Optional[float]:
+    # Exclude seed trades (FIX-10).
     sql = """
     SELECT outcome FROM trades
     WHERE ticker=? AND outcome IN ('win','loss')
+      AND (is_seed IS NULL OR is_seed = 0)
     """
     with get_connection() as conn:
         rows = conn.execute(sql, (ticker,)).fetchall()

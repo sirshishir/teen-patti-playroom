@@ -39,6 +39,7 @@ strategy:
   max_dte: 30                    # Maximum days to expiration
   ai_confidence_min: 0.72        # AI model minimum confidence to fire
   earnings_buffer_days: 5        # Skip if earnings within this many days
+  max_spread_pct: 0.08           # FIX-9: skip options whose (ask-bid)/mid exceeds this
 
   # ── Exit Parameters ────────────────────────────────────────────────────────
   take_profit_pct: 0.40          # +40% on option premium
@@ -51,6 +52,11 @@ ml:
   retrain_day: sunday
   min_trades_for_learning: 20    # Minimum trades before learning adjustments apply
   model_path: models/confidence_model.pkl
+  # FIX-10: seed the learner with virtual "near-miss" paper trades so the RF
+  # model can leave cold start. Paper mode only; seed trades never hit the
+  # broker and are excluded from win-rate reporting and learner adjustments.
+  seed_mode: true
+  seed_min_conditions: 10        # Record a seed trade when 10 <= conditions_met < 12
 
 watchlist:
   - GOOGL

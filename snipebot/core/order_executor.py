@@ -135,12 +135,25 @@ def close_position(trade: Any, current_premium: float, exit_reason: str) -> bool
     from notifications import discord_bot
     from core.risk_manager import cleanup_trail_peak
 
+    def _field(name, default=None):
+        # trade may be a sqlite3.Row (no .get) or a dict.
+        try:
+            val = trade[name]
+        except (KeyError, IndexError, TypeError):
+            return default
+        return val if val is not None else default
+
     trade_id = trade["id"]
     ticker = trade["ticker"]
     direction = trade["direction"]
     entry_price = trade["entry_price"] or 0.0
-    qty = trade.get("qty", 1) or 1
-    option_symbol = trade.get("option_symbol", "")
+    qty = _field("qty", 1) or 1
+    option_symbol = _field("option_symbol", "") or ""
+
+    # FIX-10: seed trades are virtual — force the analytical (no-broker) exit
+    # path regardless of broker/mode by clearing the option symbol.
+    if _field("is_seed", 0):
+        option_symbol = ""
 
     # Calculate PnL
     pnl_per_contract = (current_premium - entry_price) * 100

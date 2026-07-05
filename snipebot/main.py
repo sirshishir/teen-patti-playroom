@@ -170,6 +170,7 @@ def build_scheduler() -> BlockingScheduler:
 
 def main() -> None:
     logger.info("SnipeBot starting up...")
+    logger.info("Alpaca data feed: %s (adjustment=all)", os.getenv("ALPACA_FEED", "sip"))
 
     # models/ lives alongside the source code (BASE_DIR) — it is not user data
     # and is regenerated at runtime; it does not belong on the /data volume.

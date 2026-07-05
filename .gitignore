@@ -19,8 +19,9 @@ venv/
 .env
 *.db
 
-# Claude Code internal data
-.claude/
+# Claude Code internal data (sessions, worktrees) — but keep committed skills
+.claude/*
+!.claude/skills/
 
 # Editor directories and files
 .vscode/*

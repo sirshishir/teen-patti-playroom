@@ -1,0 +1,56 @@
+# daytrader/config.yaml — Day-Trade Alerts Bot (alerts & analysis ONLY — never places orders)
+
+tickers: [GOOGL, TSLA, SPY]
+timezone: US/Eastern
+
+data:
+  sip_delay_minutes: 16        # free-tier SIP historical requires end >= 15 min old
+  poll_seconds: 60             # intraday tick cadence (1-min bars)
+  premarket_start: "04:00"     # session frame starts here (ET)
+
+levels:
+  atr_period: 14               # ATR on 5-min bars
+  zone_max_atr_distance: 2.0   # only draw a zone if its ref level is within N*ATR of price
+  rearm_atr: 0.5               # hysteresis: re-arm only after price leaves zone by N*ATR
+  max_entries_per_zone: 2
+  stop_buffer_atr: 0.10        # stop = level*(1-q90) minus this ATR buffer
+  target1_atr: 1.5
+  target2_atr: 2.5
+  round_number_step:
+    default: 5.0
+    SPY: 1.0
+    GOOGL: 5.0
+    TSLA: 10.0
+  confluence_tolerance: 0.0015 # refs within 0.15% merge into one zone
+
+calibration:
+  window_sessions: 90          # rolling window for overshoot quantiles / respect rates
+  min_samples_for_quantiles: 12
+  default_q50: 0.0012          # 0.12% fallback median wick overshoot
+  default_q90: 0.0028          # 0.28% fallback 90th-pct overshoot
+  reclaim_bars: 15             # sweep must reclaim level within N 1-min bars
+  time_barrier_minutes: 60     # triple-barrier timeout
+
+scorer:
+  cold_start_events: 50        # rule-based score until this many labeled events exist
+  min_confidence_alert: 0.55   # suppress zone-entry alerts below this probability
+  model_path: models/daytrader_scorer.pkl
+
+alerts:
+  webhook_env: DISCORD_DAYTRADE_WEBHOOK_URL   # webhook for the #day-trade channel
+  premarket_plan_time: "09:15"
+  confirmed_plan_time: "09:40"                # re-send plan once true session open is known
+  eod_recap_time: "16:05"
+  nightly_calibration_time: "18:30"
+  weekly_retrain: {day: sun, time: "19:00"}
+
+storage:
+  db_path: daytrader.db
+
+analyst:                        # weekly Claude meta-review (proposer, never operator)
+  enabled: true
+  model: claude-sonnet-4-6
+  api_key_env: ANTHROPIC_API_KEY
+  time: {day: sun, time: "19:30"}    # after the 19:00 RF retrain
+  min_labeled_events_week: 15        # code-level evidence gate for proposals
+  enable_pr: true                    # false -> proposal diff posts to Discord only
