@@ -144,30 +144,37 @@ def run(start: str, end: str, tickers: List[str], commit: bool) -> None:
         if (si + 1) % 20 == 0:
             print(f"  … {si + 1}/{len(sessions)} sessions")
 
-    _report(results)
+    report = _report(results)
     if commit:
         _commit_calibration(tickers, samples, outcomes)
+        report += "\nCalibration committed to daytrader.db — live bot is seeded."
         print("Calibration committed to daytrader.db — live bot is seeded.")
+    return report
 
 
-def _report(results: List[Dict]) -> None:
+def _report(results: List[Dict]) -> str:
+    """Build the per-level report string (also prints it for CLI use)."""
     if not results:
-        print("No zone touches generated — widen dates or check data access.")
-        return
+        msg = "No zone touches generated — widen dates or check data access."
+        print(msg)
+        return msg
     df = pd.DataFrame(results)
-    print(f"\n{'=' * 62}\nTOTAL touches: {len(df)}")
+    lines = [f"{'=' * 62}", f"TOTAL touches: {len(df)}"]
     for (tk, lt), g in df.groupby(["ticker", "lt"]):
         n = len(g)
         wins = (g["outcome"] == "win").sum()
         losses = (g["outcome"] == "loss").sum()
         to = (g["outcome"] == "timeout").sum()
         wr = wins / (wins + losses) if wins + losses else 0
-        print(f"{tk:6s} {lt:9s} n={n:4d} win%={wr:5.1%} "
-              f"timeout={to:3d} avgR={g['r'].mean():+.2f} "
-              f"expectancy/R={g['r'].mean():+.3f}")
-    print(f"{'=' * 62}")
-    print("Read: win% is the calibrated-zone respect rate; expectancy is per-"
-          "touch in R. Level types with n<20 are noise — keep collecting.")
+        lines.append(f"{tk:6s} {lt:9s} n={n:4d} win%={wr:5.1%} "
+                     f"timeout={to:3d} avgR={g['r'].mean():+.2f} "
+                     f"expectancy/R={g['r'].mean():+.3f}")
+    lines.append(f"{'=' * 62}")
+    lines.append("Read: win% is the calibrated-zone respect rate; expectancy is "
+                 "per-touch in R. Level types with n<20 are noise — keep collecting.")
+    report = "\n".join(lines)
+    print(report)
+    return report
 
 
 def _commit_calibration(tickers, samples, outcomes) -> None:

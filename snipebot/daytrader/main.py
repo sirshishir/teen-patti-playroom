@@ -236,9 +236,41 @@ def _run_analyst() -> None:
     analyst.run_weekly()
 
 
+def _maybe_seed_backtest() -> None:
+    """
+    One-time calibration seed for terminal-less (dashboard) deploys.
+
+    If DAYTRADER_BACKTEST_ON_START is set, run the walk-forward backtest once at
+    startup, post the per-level report to #day-trade, and commit calibration to
+    daytrader.db — then continue to the live loop. Remove the env var afterwards
+    so it doesn't re-run on every deploy. Window via DAYTRADER_BACKTEST_START /
+    DAYTRADER_BACKTEST_END (defaults: 2025-01-02 → today).
+    """
+    import os
+    from datetime import date
+    if not os.getenv("DAYTRADER_BACKTEST_ON_START", "").strip():
+        return
+    start = os.getenv("DAYTRADER_BACKTEST_START", "2025-01-02").strip()
+    end   = os.getenv("DAYTRADER_BACKTEST_END", "").strip() or date.today().isoformat()
+    try:
+        from daytrader import backtest
+        alerts.send_system(
+            f"⏳ Seeding calibration via walk-forward backtest {start}→{end} "
+            f"({', '.join(TICKERS)}). This can take several minutes…")
+        report = backtest.run(start, end, TICKERS, commit=True)
+        alerts.send_analyst_report(
+            "📊 **Backtest seed report** — review before trusting alerts. "
+            "Level types with n≥20 and win% > ~52% carry edge; near coin-flip "
+            "means keep collecting.\n\n```\n" + (report or "")[:1800] + "\n```")
+    except Exception as exc:
+        logger.error("Startup backtest seed failed: %s", exc)
+        alerts.send_system(f"⚠️ Backtest seed failed: {exc}")
+
+
 def run() -> None:
     load_dotenv()
     store.init_db()
+    _maybe_seed_backtest()   # one-time calibration seed if DAYTRADER_BACKTEST_ON_START set
     a = CONFIG["alerts"]
     sched = BackgroundScheduler(timezone=ET)
     h1, m1 = a["premarket_plan_time"].split(":")
