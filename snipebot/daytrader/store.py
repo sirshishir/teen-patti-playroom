@@ -19,7 +19,13 @@ _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _db_path() -> str:
     from daytrader.settings import CONFIG
     p = CONFIG["storage"]["db_path"]
-    return p if os.path.isabs(p) else os.path.join(_BASE_DIR, p)
+    if os.path.isabs(p):
+        return p
+    # Persist under the data volume on Fly (SNIPEBOT_DATA_DIR=/data); locally
+    # this falls back to the snipebot/ directory. Reusing the env var keeps the
+    # zero-coupling contract (no import from snipebot's own modules).
+    base = os.getenv("SNIPEBOT_DATA_DIR", _BASE_DIR)
+    return os.path.join(base, p)
 
 
 @contextmanager

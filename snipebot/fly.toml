@@ -8,9 +8,16 @@
 # the machine in a loop.
 #
 # NOTE: `fly launch` / Fly's GitHub integration will try to regenerate this
-# file and re-add an [http_service]. Always deploy with the committed config:
-#   fly deploy                       (uses this fly.toml as-is)
-#   fly launch --no-deploy --copy-config --name teen-patti-playroom  (first time)
+# file and re-add an [http_service]. Always deploy with the committed config.
+#
+# TWO PROCESSES → TWO MACHINES from one image (one deploy):
+#   snipebot  = the options paper-trading bot   → #price-alert, snipebot.db
+#   daytrader = the day-trade alerts bot        → #day-trade,  daytrader.db
+# Each machine mounts its OWN volume at /data (Fly volumes attach to a single
+# machine — they cannot be shared). Create BOTH volumes before first deploy:
+#   snipebot_data   (may already exist)
+#   daytrader_data
+# Neither process opens a port, so there is intentionally NO [http_service].
 
 # ── App identity ──────────────────────────────────────────────────────────────
 app = 'teen-patti-playroom'
@@ -20,21 +27,31 @@ primary_region = 'ord'
 [build]
 
 # ── Runtime environment variables ─────────────────────────────────────────────
-# Non-secret config only. Secrets (API keys, Discord token, broker creds) must
-# be set via: fly secrets set KEY=value
+# Non-secret config only. Secrets (API keys, Discord token/webhooks) are set in
+# the Fly dashboard → Secrets (or `fly secrets set KEY=value`).
 [env]
   PYTHONUNBUFFERED = '1'
   SNIPEBOT_DATA_DIR = '/data'
 
-# ── Persistent volume ─────────────────────────────────────────────────────────
-# Stores snipebot.db (SQLite) and logs/ across deploys and restarts.
-# Create it once before first deploy:
-#   fly volumes create snipebot_data --region ord --size 1
+# ── Processes ──────────────────────────────────────────────────────────────────
+[processes]
+  snipebot = 'python main.py'
+  daytrader = 'python -m daytrader.main'
+
+# ── Persistent volumes (one per machine) ───────────────────────────────────────
+# snipebot.db + logs/ live here for the snipebot machine.
 [[mounts]]
   source = 'snipebot_data'
   destination = '/data'
+  processes = ['snipebot']
 
-# ── VM sizing ─────────────────────────────────────────────────────────────────
+# daytrader.db (calibration/training) lives here for the daytrader machine.
+[[mounts]]
+  source = 'daytrader_data'
+  destination = '/data'
+  processes = ['daytrader']
+
+# ── VM sizing (applies to both process machines) ───────────────────────────────
 [[vm]]
   memory = '1gb'
   cpu_kind = 'shared'
