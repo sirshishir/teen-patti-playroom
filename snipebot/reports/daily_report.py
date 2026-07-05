@@ -46,8 +46,8 @@ def send_report() -> None:
 
     open_count = len(open_trades)
 
-    # ── Portfolio value (starting capital + all realised PnL) ──
-    all_closed = db.get_all_closed_trades()
+    # ── Portfolio value (starting capital + all realised PnL, real trades only) ──
+    all_closed = db.get_real_closed_trades()   # excludes seed trades (FIX-10)
     total_realised = sum(t["pnl"] for t in all_closed if t["pnl"] is not None)
     starting = cfg["trading"]["capital"]
     portfolio_value = round(starting + total_realised, 2)

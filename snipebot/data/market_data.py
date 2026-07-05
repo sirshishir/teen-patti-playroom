@@ -15,7 +15,7 @@ Daily analysis cache (populated at 9 AM ET):
 import logging
 import os
 import time
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from typing import Optional, Dict, List, Any
 
 import pandas as pd
@@ -29,10 +29,26 @@ _analysis_cache: Dict[str, Dict] = {}
 _MAX_RETRIES = 3
 _RETRY_DELAY = 0.5
 
+# FIX-1: default to SIP (full consolidated tape). Free on the Basic plan as long
+# as the request `end` is >= 15 min old (we subtract 16). An Algo Trader Plus
+# subscription can flip to real-time SIP by setting ALPACA_FEED=sip-realtime
+# (treated as sip but without the 16-min lag) — kept as a simple override here.
+_SIP_LAG_MIN = 16
+
 
 def _get_broker() -> str:
     """Return the active broker name, lower-cased. Defaults to 'alpaca'."""
     return os.getenv("BROKER", "alpaca").lower()
+
+
+def _alpaca_feed() -> str:
+    """Active Alpaca data feed: 'sip' (default) or 'iex' via ALPACA_FEED env."""
+    return os.getenv("ALPACA_FEED", "sip").lower()
+
+
+# Intervals we build by resampling 1-minute SIP bars (FIX-7) so primary and
+# fallback emit identical 09:30-anchored RTH candles.
+_RESAMPLE_RULE = {"1Hour": "1h", "4Hour": "4h"}
 
 
 def _get_alpaca_stock_client():
@@ -122,7 +138,7 @@ def _fetch_webull_bars(ticker: str, interval: str,
     """
     from data.webull_client import get_webull_client
 
-    end_dt   = datetime.utcnow()
+    end_dt   = datetime.now(timezone.utc)
     start_dt = end_dt - timedelta(days=period_days)
 
     client = get_webull_client()
@@ -138,27 +154,53 @@ def _fetch_webull_bars(ticker: str, interval: str,
     return df
 
 
-def _fetch_alpaca_bars(ticker: str, interval: str,
-                        period_days: int) -> pd.DataFrame:
+def _fetch_alpaca_bars(ticker: str, interval: str, period_days: int,
+                       feed: Optional[str] = None) -> pd.DataFrame:
+    """
+    Fetch native Alpaca bars.
+
+    FIX-1: default feed is SIP (full consolidated tape) — IEX is ~2% of volume
+    and its wicks miss the true extremes that sweeps/order blocks depend on.
+    FIX-2: adjustment=ALL (splits/dividends) so a corporate action inside the
+    lookback window doesn't create phantom gaps.
+    FIX-8: tz-aware UTC datetimes (datetime.now(timezone.utc), not utcnow()).
+
+    For 1Hour/4Hour we resample from 1-minute SIP bars (FIX-7) so boundaries
+    match the yfinance fallback exactly.
+    """
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+    from alpaca.data.enums import Adjustment, DataFeed
+
+    feed = (feed or _alpaca_feed()).lower()
+
+    # Route 1H/4H through the 1-minute SIP resampler for session alignment.
+    if interval in _RESAMPLE_RULE:
+        from data.bars import resample_rth
+        df_1min = _fetch_alpaca_bars(ticker, "1Min", period_days, feed=feed)
+        out = resample_rth(df_1min, _RESAMPLE_RULE[interval])
+        if out is None or out.empty:
+            raise ValueError(f"Empty resampled {interval} for {ticker}")
+        return out
 
     tf_map = {
         "1Min":  TimeFrame(1,  TimeFrameUnit.Minute),
         "5Min":  TimeFrame(5,  TimeFrameUnit.Minute),
         "15Min": TimeFrame(15, TimeFrameUnit.Minute),
-        "1Hour": TimeFrame(1,  TimeFrameUnit.Hour),
-        "4Hour": TimeFrame(4,  TimeFrameUnit.Hour),
         "1Day":  TimeFrame(1,  TimeFrameUnit.Day),
         "1Week": TimeFrame(1,  TimeFrameUnit.Week),
     }
     tf    = tf_map.get(interval, TimeFrame(5, TimeFrameUnit.Minute))
-    end   = datetime.utcnow()
+    end   = datetime.now(timezone.utc)
+    if feed.startswith("sip") and feed != "sip-realtime":
+        end = end - timedelta(minutes=_SIP_LAG_MIN)  # free-tier SIP: end >= 15 min old
     start = end - timedelta(days=period_days)
 
+    data_feed = DataFeed.IEX if feed == "iex" else DataFeed.SIP
     client = _get_alpaca_stock_client()
     req    = StockBarsRequest(symbol_or_symbols=ticker, timeframe=tf,
-                               start=start, end=end, feed="iex")
+                               start=start, end=end,
+                               feed=data_feed, adjustment=Adjustment.ALL)
     bars   = client.get_stock_bars(req)
     df     = bars.df
     if df.empty:
@@ -180,6 +222,13 @@ def _fetch_yfinance_bars(ticker: str, interval: str,
     if df.empty:
         raise ValueError(f"yfinance empty for {ticker}")
     df.columns = [c.lower() for c in df.columns]
+    # FIX-7: align 1H boundaries to the same 09:30-anchored RTH candles as the
+    # Alpaca path, so primary and fallback produce identical swings/OBs/sweeps.
+    if interval == "1Hour":
+        from data.bars import resample_rth
+        df = resample_rth(df, "1h")
+        if df is None or df.empty:
+            raise ValueError(f"yfinance 1H resample empty for {ticker}")
     return df
 
 
@@ -239,18 +288,17 @@ def fetch_4h_ohlcv(ticker: str, lookback_days: int = 30) -> Optional[pd.DataFram
 
 def _fetch_yfinance_4h(ticker: str, lookback_days: int) -> pd.DataFrame:
     """yfinance 1H download resampled to 4H (yfinance has no native 4H)."""
+    from data.bars import resample_rth
     period = min(lookback_days, 59)   # yfinance caps 1H at 60 days
     df = yf.download(ticker, period=f"{period}d", interval="1h",
                      auto_adjust=True, progress=False)
     if df.empty:
         raise ValueError(f"yfinance 1H empty for {ticker}")
     df.columns = [c.lower() for c in df.columns]
-    df_4h = df.resample("4h").agg({
-        "open": "first", "high": "max",
-        "low":  "min",   "close": "last",
-        "volume": "sum",
-    }).dropna()
-    if df_4h.empty:
+    # FIX-7: resample through the shared RTH-anchored factory so 4H boundaries
+    # (09:30-anchored) match the Alpaca 1-min→4H path exactly.
+    df_4h = resample_rth(df, "4h")
+    if df_4h is None or df_4h.empty:
         raise ValueError(f"4H resample empty for {ticker}")
     return df_4h
 
@@ -384,6 +432,8 @@ def _fetch_alpaca_options(ticker: str, min_dte: int,
     if df.empty:
         raise ValueError(f"Empty Alpaca options for {ticker}")
     df["mid"] = (df["bid"] + df["ask"]) / 2
+    # FIX-9: keep mid for display; spread_pct gates tradeability, ask is the fill.
+    df["spread_pct"] = (df["ask"] - df["bid"]) / df["mid"]
     df["dte"] = (pd.to_datetime(df["expiry"]) - pd.Timestamp(date.today())).dt.days
     return df
 
@@ -404,6 +454,7 @@ def _fetch_yfinance_options(ticker: str, min_dte: int,
             df_part["expiry"]   = exp_str
             df_part["dte"]      = dte
             df_part["mid"]      = (df_part["bid"] + df_part["ask"]) / 2
+            df_part["spread_pct"] = (df_part["ask"] - df_part["bid"]) / df_part["mid"]
             frames.append(df_part)
     if not frames:
         raise ValueError(f"No yfinance options for {ticker}")
@@ -411,19 +462,48 @@ def _fetch_yfinance_options(ticker: str, min_dte: int,
 
 
 def select_option_contract(chain: pd.DataFrame, direction: str,
-                            current_price: float) -> Optional[Dict[str, Any]]:
+                            current_price: float,
+                            max_spread_pct: float = 0.08) -> Optional[Dict[str, Any]]:
+    """
+    Pick the ATM contract, rejecting illiquid (wide-spread) options.
+
+    FIX-9: entry premium is the ASK (what you actually pay), not the mid — mid
+    flatters every fill by half the spread. Contracts with
+    spread_pct > max_spread_pct are skipped.
+    """
     opt_type = "call" if direction == "call" else "put"
     sub = chain[chain["option_type"] == opt_type].copy()
     if sub.empty:
         return None
-    sub["strike_dist"] = (sub["strike"] - current_price).abs()
-    atm = sub.nsmallest(1, "strike_dist").iloc[0]
+
+    if "spread_pct" not in sub.columns:
+        sub["spread_pct"] = (sub["ask"] - sub["bid"]) / sub["mid"]
+
+    tradeable = sub[sub["spread_pct"].notna() & (sub["spread_pct"] <= max_spread_pct)]
+    if tradeable.empty:
+        best_spread = sub["spread_pct"].min()
+        logger.warning(
+            "No %s contract within max_spread_pct=%.2f (tightest %.2f) — skipping",
+            opt_type, max_spread_pct,
+            best_spread if pd.notna(best_spread) else float("nan"),
+        )
+        return None
+
+    tradeable = tradeable.copy()
+    tradeable["strike_dist"] = (tradeable["strike"] - current_price).abs()
+    atm = tradeable.nsmallest(1, "strike_dist").iloc[0]
+
+    mid = float(atm["mid"]) if pd.notna(atm.get("mid")) else 0.0
+    ask = float(atm["ask"]) if pd.notna(atm.get("ask")) else mid
     return {
-        "symbol":  atm.get("symbol", ""),
-        "strike":  float(atm["strike"]),
-        "expiry":  str(atm["expiry"]),
-        "dte":     int(atm["dte"]),
-        "premium": float(atm["mid"]) if pd.notna(atm.get("mid")) else 0.0,
+        "symbol":     atm.get("symbol", ""),
+        "strike":     float(atm["strike"]),
+        "expiry":     str(atm["expiry"]),
+        "dte":        int(atm["dte"]),
+        "premium":    ask,                       # FIX-9: fill at the ask
+        "mid":        mid,                        # kept for display
+        "ask":        ask,
+        "spread_pct": float(atm["spread_pct"]) if pd.notna(atm.get("spread_pct")) else None,
     }
 
 

@@ -454,9 +454,15 @@ The bot will **never** switch to live mode automatically. A human must change `.
 
 ## Watchlist
 
-The default watchlist is: `GOOGL, MSFT, TSLA, AAPL, SPY`
+The watchlist is stored in the database (`watchlist` table), seeded on first run
+with `GOOGL, MSFT, TSLA, AAPL, SPY`. It is the single source of truth — the
+scanner, the 9 AM analysis cache, and the weekly learner all read it via
+`db.get_watchlist()`.
 
-To change it, edit the `watchlist` list in `data/market_data.py` (inside `cache_sr_zones`) and `ml/learner.py` (`_WATCHLIST`).
+To change it, use the Discord commands (no code edits, no redeploy):
+- `/add ticker:META` — add a ticker
+- `/remove ticker:META` — remove a ticker
+- `/show` — list the watchlist and per-ticker alert thresholds
 
 ---
 

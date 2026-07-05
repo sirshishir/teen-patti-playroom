@@ -15,6 +15,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List
 
+import pandas as pd
 import pytz
 import yaml
 
@@ -83,10 +84,14 @@ def run_scan() -> None:
     now_et = datetime.now(_ET)
     logger.info("SMC scan started at %s ET", now_et.strftime("%H:%M:%S"))
 
+    # FIX-4: VIX gate must fail CLOSED. A data outage must never *enable*
+    # trading, so a missing VIX halts the whole cycle rather than defaulting to
+    # a passing value.
     vix = fetch_vix()
     if vix is None:
-        logger.warning("VIX unavailable — using 15.0")
-        vix = 15.0
+        logger.error("VIX unavailable — halting scan cycle (fail-closed)")
+        discord_bot.send_system_alert("data_error", "VIX", {})
+        return
 
     cfg = _load_config()
 
@@ -109,8 +114,20 @@ def run_scan() -> None:
             logger.debug("No daily cache for %s — skipping until 9 AM cache runs", ticker)
             continue
 
+        # ── FIX-3: evaluate on COMPLETED bars only ──────────────────────────
+        # The bar forming at :00/:30 is partial — RVOL is understated ~2x and a
+        # "sweep + close back inside" can repaint when the bar completes. Drop
+        # the in-progress bar for analysis, but keep its close as the live price.
+        current_price = float(df["close"].iloc[-1])
+        bar_span = pd.Timedelta(hours=1)
+        if pd.Timestamp.now(tz="UTC") < df.index[-1] + bar_span:
+            df_eval = df.iloc[:-1]
+        else:
+            df_eval = df
+
         # ── Compute all SMC indicators ──────────────────────────────────────
-        indicators = compute_all_indicators(df, cached)
+        indicators = compute_all_indicators(df_eval, cached)
+        indicators["current_price"] = current_price   # freshest price wins
 
         # ── Determine direction ─────────────────────────────────────────────
         direction = detect_direction(indicators)
@@ -175,6 +192,17 @@ def run_scan() -> None:
                 indicators, confidence, vix, cond_reasons,
             )
 
+        # ── FIX-10: seed the learner with virtual near-miss paper trades ────
+        # Paper-mode only. Records a virtual (is_seed=1) position — monitored by
+        # the position monitor like a paper trade but NEVER sent to the broker —
+        # so the RF model has enough samples to leave cold start.
+        seed_mode = cfg.get("ml", {}).get("seed_mode", False)
+        seed_min  = cfg.get("ml", {}).get("seed_min_conditions", 10)
+        paper     = os.getenv("TRADING_MODE", "paper").lower() == "paper"
+        if (seed_mode and paper and seed_min <= conditions_met < 12
+                and not db.seeded_ticker_today(ticker)):
+            _record_seed_trade(ticker, indicators, confidence, vix, direction, cfg)
+
         # ── Full entry gate ─────────────────────────────────────────────────
         if halt_file_exists() or conditions_met < 12:
             continue
@@ -225,7 +253,8 @@ def run_scan() -> None:
 
 # ── On-demand analysis (read-only, no orders) ───────────────────────────────
 
-def analyze_ticker(ticker: str, vix: float, fresh: bool = True) -> Dict:
+def analyze_ticker(ticker: str, vix: float, fresh: bool = True,
+                   vix_assumed: bool = False) -> Dict:
     """
     Read-only SMC analysis for a single ticker. Places no orders and writes
     nothing to the DB.
@@ -233,6 +262,8 @@ def analyze_ticker(ticker: str, vix: float, fresh: bool = True) -> Dict:
     fresh=True  → recompute the full multi-timeframe analysis live (used by
                   /analysis so the numbers are current, not from the 9 AM cache).
     fresh=False → use the cached daily analysis (cheaper).
+    vix_assumed → True if *vix* is a fallback value (real VIX was unavailable);
+                  the vix_ok reason is annotated accordingly (FIX-4).
     """
     ticker = ticker.strip().upper()
     try:
@@ -257,6 +288,8 @@ def analyze_ticker(ticker: str, vix: float, fresh: bool = True) -> Dict:
             indicators, vix, confidence, eval_dir, ticker)
         conds   = {k: passed for k, (passed, _r) in detailed.items()}
         reasons = {k: reason for k, (_p, reason) in detailed.items()}
+        if vix_assumed:
+            reasons["vix_ok"] = "VIX unavailable (assumed)"
 
         return {
             "ticker":         ticker,
@@ -281,8 +314,11 @@ def analyze_watchlist(tickers: List[str] = None, fresh: bool = True) -> List[Dic
     Read-only SMC analysis for a list of tickers (defaults to the dynamic
     watchlist). Used by the Discord /analysis command.
     """
+    # Read-only path: unlike run_scan (which fails closed), keep a 15.0 fallback
+    # so /analysis still renders — but flag it so the vix_ok reason says so.
     vix = fetch_vix()
-    if vix is None:
+    vix_assumed = vix is None
+    if vix_assumed:
         vix = 15.0
     if tickers is None:
         tickers = db.get_watchlist()
@@ -290,7 +326,8 @@ def analyze_watchlist(tickers: List[str] = None, fresh: bool = True) -> List[Dic
     results: List[Dict] = []
     for ticker in tickers:
         time.sleep(0.2)  # rate-limit
-        results.append(analyze_ticker(ticker, vix, fresh=fresh))
+        results.append(analyze_ticker(ticker, vix, fresh=fresh,
+                                      vix_assumed=vix_assumed))
     return results
 
 
@@ -307,11 +344,13 @@ def _pick_contract(ticker: str, direction: str,
     try:
         min_dte = cfg["strategy"]["min_dte"]
         max_dte = cfg["strategy"]["max_dte"]
+        max_spread = cfg["strategy"].get("max_spread_pct", 0.08)
         chain   = fetch_options_chain(ticker, min_dte=min_dte, max_dte=max_dte)
         if chain is None or chain.empty:
             logger.warning("No options chain for %s", ticker)
             return None
-        contract = select_option_contract(chain, direction, current_price)
+        contract = select_option_contract(chain, direction, current_price,
+                                          max_spread_pct=max_spread)
         if contract is None:
             logger.warning("No suitable contract for %s %s", ticker, direction)
         return contract
@@ -320,7 +359,7 @@ def _pick_contract(ticker: str, direction: str,
         return None
 
 
-def _notify_entry(signal: Dict, indicators: Dict) -> None:
+def _notify_entry(signal: Dict, indicators: Dict, is_seed: bool = False) -> None:
     fib   = indicators.get("fib") or {}
     ob    = indicators.get("nearest_ob") or {}
     discord_bot.send_trade_entry(
@@ -339,7 +378,35 @@ def _notify_entry(signal: Dict, indicators: Dict) -> None:
         zone_low    = ob.get("low", 0),
         zone_high   = ob.get("high", 0),
         zone_touches = int(indicators.get("order_block_quality", 0)),
+        is_seed     = is_seed,
     )
+
+
+def _record_seed_trade(ticker: str, indicators: Dict, confidence: float,
+                       vix: float, direction: str, cfg: Dict) -> None:
+    """
+    Record a virtual (is_seed=1) paper trade for a near-miss setup. Builds the
+    same signal payload and picks a real contract so the position monitor can
+    track it, but never places a broker order (FIX-10).
+    """
+    try:
+        signal = build_signal(ticker, indicators, confidence, vix, direction)
+        contract = _pick_contract(ticker, direction,
+                                  indicators["current_price"], cfg)
+        if contract is None:
+            return
+        signal["option_symbol"] = contract["symbol"]
+        signal["strike"]        = contract["strike"]
+        signal["expiry"]        = contract["expiry"]
+        signal["dte"]           = contract["dte"]
+        signal["premium"]       = contract["premium"]
+        signal["qty"]           = 1
+        record   = signal_to_trade_record(signal, is_seed=True)
+        trade_id = db.insert_trade(record)
+        logger.info("🧪 SEED trade recorded: id=%d %s %s", trade_id, ticker, direction)
+        _notify_entry(signal, indicators, is_seed=True)
+    except Exception as exc:
+        logger.error("Seed trade recording failed for %s: %s", ticker, exc)
 
 
 def _safe_fetch_ohlcv(ticker: str):

@@ -94,11 +94,14 @@ def send_trade_entry(
     zone_low: float,
     zone_high: float,
     zone_touches: int,
+    is_seed: bool = False,
 ) -> bool:
     tp_price = round(premium * 1.40, 2)
     sl_price = round(premium * 0.75, 2)
+    header = ("🧪 SEED (virtual — not sent to broker)" if is_seed
+              else "🎯 SNIPE FIRED")
     content = (
-        f"🎯 SNIPE FIRED — {ticker} {direction.upper()}\n"
+        f"{header} — {ticker} {direction.upper()}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 Direction: {direction.upper()}\n"
         f"💰 Strike: ${strike} | Expiry: {expiry} ({dte} DTE)\n"

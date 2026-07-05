@@ -183,7 +183,8 @@ def detect_market_structure(df: pd.DataFrame,
 # ── Liquidity Zones ───────────────────────────────────────────────────────────
 
 def detect_liquidity_zones(df: pd.DataFrame,
-                            tolerance: float = 0.002) -> List[Dict]:
+                            tolerance: float = 0.002,
+                            sweep_window_start: Optional[int] = None) -> List[Dict]:
     """
     Find equal highs (buy-side liquidity) and equal lows (sell-side liquidity).
 
@@ -191,9 +192,16 @@ def detect_liquidity_zones(df: pd.DataFrame,
       type  : 'buy_side' | 'sell_side'
       level : float — price of the liquidity pool
       count : int   — number of touches
+      index : int   — bar index of the last touch (FIX-5, for invalidation)
+
+    FIX-5: a pool that a later bar has *closed* through is consumed and no longer
+    valid liquidity. Zones consumed before the sweep-detection window are dropped;
+    pass *sweep_window_start* (default = last bar) to preserve a fresh sweep
+    happening inside that window.
     """
     high  = df["high"].astype(float).values
     low   = df["low"].astype(float).values
+    close = df["close"].astype(float).values
     zones = []
 
     # Scan for equal highs
@@ -204,6 +212,7 @@ def detect_liquidity_zones(df: pd.DataFrame,
                 "type": "buy_side",
                 "level": round(float(high[i]), 4),
                 "count": len(matches) + 1,
+                "index": i,
             })
 
     # Scan for equal lows
@@ -214,10 +223,23 @@ def detect_liquidity_zones(df: pd.DataFrame,
                 "type": "sell_side",
                 "level": round(float(low[i]), 4),
                 "count": len(matches) + 1,
+                "index": i,
             })
 
-    # Deduplicate nearby zones of same type
-    return _merge_nearby_zones(zones, tolerance)
+    merged = _merge_nearby_zones(zones, tolerance)
+
+    # Invalidate consumed pools.
+    if sweep_window_start is None:
+        sweep_window_start = len(close)
+    return [z for z in merged if _still_valid(z, close, sweep_window_start)]
+
+
+def _still_valid(zone: Dict, closes, sweep_window_start: int) -> bool:
+    """A pool is invalid if a later bar closed beyond it before the sweep window."""
+    rng = range(zone["index"] + 1, min(sweep_window_start, len(closes)))
+    if zone["type"] == "buy_side":
+        return not any(closes[j] > zone["level"] for j in rng)
+    return not any(closes[j] < zone["level"] for j in rng)
 
 
 def _merge_nearby_zones(zones: List[Dict], tolerance: float) -> List[Dict]:
@@ -228,6 +250,7 @@ def _merge_nearby_zones(zones: List[Dict], tolerance: float) -> List[Dict]:
             if m["type"] == z["type"] and abs(m["level"] - z["level"]) / m["level"] <= tolerance:
                 m["level"] = (m["level"] * m["count"] + z["level"] * z["count"]) / (m["count"] + z["count"])
                 m["count"] += z["count"]
+                m["index"] = max(m["index"], z["index"])   # keep most-recent touch
                 absorbed = True
                 break
         if not absorbed:
@@ -257,22 +280,29 @@ def detect_liquidity_sweep(df: pd.DataFrame,
     highs  = recent["high"].astype(float).values
     lows   = recent["low"].astype(float).values
     closes = recent["close"].astype(float).values
+    current_price = float(closes[-1])
 
-    for zone in liquidity_zones:
-        lvl  = zone["level"]
-        ztype = zone["type"]
-
-        for i in range(len(recent)):
-            if ztype == "buy_side":
+    # FIX-5: scan newest → oldest, collect ALL sweep hits, and return the most
+    # RECENT one (largest bar index); tie-break by closeness to current price.
+    # The old code returned the first zone in price-sorted order — not the
+    # actual latest sweep event.
+    hits = []  # (bar_idx, sweep_type, level, dist_from_price)
+    for i in range(len(recent) - 1, -1, -1):
+        for zone in liquidity_zones:
+            lvl, ztype = zone["level"], zone["type"]
+            if ztype == "buy_side" and highs[i] > lvl and closes[i] < lvl:
                 # Wick above level, close below → bearish sweep (PUT signal)
-                if highs[i] > lvl and closes[i] < lvl:
-                    return {"swept": True, "sweep_type": "buy_side", "sweep_level": lvl}
-            elif ztype == "sell_side":
+                hits.append((i, "buy_side", lvl, abs(current_price - lvl)))
+            elif ztype == "sell_side" and lows[i] < lvl and closes[i] > lvl:
                 # Wick below level, close above → bullish sweep (CALL signal)
-                if lows[i] < lvl and closes[i] > lvl:
-                    return {"swept": True, "sweep_type": "sell_side", "sweep_level": lvl}
+                hits.append((i, "sell_side", lvl, abs(current_price - lvl)))
 
-    return {"swept": False, "sweep_type": None, "sweep_level": None}
+    if not hits:
+        return {"swept": False, "sweep_type": None, "sweep_level": None}
+
+    # Largest bar index wins; tie-break by smallest distance from current price.
+    best = max(hits, key=lambda h: (h[0], -h[3]))
+    return {"swept": True, "sweep_type": best[1], "sweep_level": best[2]}
 
 
 # ── Order Block Detection ─────────────────────────────────────────────────────
@@ -280,38 +310,56 @@ def detect_liquidity_sweep(df: pd.DataFrame,
 def detect_order_blocks(df: pd.DataFrame,
                          sh_idx: np.ndarray,
                          sl_idx: np.ndarray,
-                         atr: float) -> List[Dict]:
+                         atr: float,
+                         as_of: Optional[int] = None,
+                         require_bos: bool = False) -> List[Dict]:
     """
     Identify bullish and bearish order blocks (last opposing candle before impulse).
 
     Bullish OB : last bearish candle before a bullish impulse (≥ 1.5 × ATR in 3 bars)
     Bearish OB : last bullish candle before a bearish impulse (≥ 1.5 × ATR in 3 bars)
 
+    FIX-6:
+      * as_of: treat bar *as_of* as "now" — impulse windows and mitigation scans
+        never read bars at index ≥ as_of. Live callers leave it None (now = end);
+        vectorized backtests MUST pass as_of to avoid look-ahead.
+      * require_bos: keep an OB only if its impulse closed beyond the most recent
+        opposing swing (a true ICT displacement / break of structure).
+
     Returns list of dicts:
       type      : 'bullish' | 'bearish'
-      high      : float
-      low       : float
-      center    : float
-      strength  : float (impulse size / ATR)
-      index     : int (bar index in df)
-      mitigated : bool (price has since traded through the OB)
+      high, low, center, strength, index, mitigated
     """
     opens  = df["open"].astype(float).values
     highs  = df["high"].astype(float).values
     lows   = df["low"].astype(float).values
     closes = df["close"].astype(float).values
     n      = len(closes)
+    n_eff  = as_of if as_of is not None else n
     impulse_min = 1.5 * atr if atr > 0 else 0.001
 
+    sh_list = list(sh_idx) if sh_idx is not None else []
+    sl_list = list(sl_idx) if sl_idx is not None else []
+
+    def _bos_ok(i: int, bullish: bool, impulse_peak: float) -> bool:
+        if not require_bos:
+            return True
+        if bullish:
+            prior = [s for s in sh_list if s < i]
+            return bool(prior) and impulse_peak > highs[max(prior)]
+        prior = [s for s in sl_list if s < i]
+        return bool(prior) and impulse_peak < lows[max(prior)]
+
     obs = []
-    for i in range(n - 4):
+    for i in range(n_eff - 4):
         # Bullish OB: bearish candle at i, followed by bullish impulse
         if closes[i] < opens[i]:  # bearish candle
-            future_move = max(closes[i+1:i+4]) - closes[i]
-            if future_move >= impulse_min:
+            peak = max(closes[i+1:i+4])
+            future_move = peak - closes[i]
+            if future_move >= impulse_min and _bos_ok(i, True, peak):
                 ob_high = max(opens[i], closes[i])
                 ob_low  = min(opens[i], closes[i])
-                mitigated = any(lows[j] < ob_low for j in range(i + 1, n))
+                mitigated = any(lows[j] < ob_low for j in range(i + 1, n_eff))
                 strength = round(future_move / atr, 2) if atr > 0 else 1.0
                 obs.append({
                     "type": "bullish", "high": round(ob_high, 4),
@@ -323,11 +371,12 @@ def detect_order_blocks(df: pd.DataFrame,
 
         # Bearish OB: bullish candle at i, followed by bearish impulse
         if closes[i] > opens[i]:  # bullish candle
-            future_move = closes[i] - min(closes[i+1:i+4])
-            if future_move >= impulse_min:
+            trough = min(closes[i+1:i+4])
+            future_move = closes[i] - trough
+            if future_move >= impulse_min and _bos_ok(i, False, trough):
                 ob_high = max(opens[i], closes[i])
                 ob_low  = min(opens[i], closes[i])
-                mitigated = any(highs[j] > ob_high for j in range(i + 1, n))
+                mitigated = any(highs[j] > ob_high for j in range(i + 1, n_eff))
                 strength = round(future_move / atr, 2) if atr > 0 else 1.0
                 obs.append({
                     "type": "bearish", "high": round(ob_high, 4),
@@ -677,7 +726,7 @@ def compute_all_indicators(df: pd.DataFrame,
         fib            = compute_fibonacci_levels(df, sh_idx, sl_idx, market_struct)
         ob_4h          = []
 
-    # ── Intraday indicators from 5-min df ────────────────────────────────────
+    # ── Intraday indicators from the 1-hour entry-trigger df ─────────────────
     rvol             = compute_rvol(df)
     atr_val          = compute_atr(df)
     atr_expanding, atr_ratio = check_atr_expansion(df)

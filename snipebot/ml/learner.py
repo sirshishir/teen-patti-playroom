@@ -40,8 +40,10 @@ def _log_change(message: str) -> None:
 
 
 def _compute_stats(trades: List[Dict]) -> Dict[str, Any]:
+    # FIX-10: exclude seed trades from win-rate / parameter-adjustment stats.
     closed = [t for t in trades
-              if t.get("outcome") in ("win", "loss") and t.get("pnl") is not None]
+              if t.get("outcome") in ("win", "loss") and t.get("pnl") is not None
+              and not t.get("is_seed")]
     if not closed:
         return {"win_rate": 0.0, "avg_win": 0.0, "avg_loss": 0.0,
                 "expectancy": 0.0, "n": 0}
