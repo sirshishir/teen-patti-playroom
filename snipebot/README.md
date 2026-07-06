@@ -42,13 +42,41 @@ SnipeBot is an automated options trading bot that uses **Smart Money Concepts (S
 - **Webull** (optional): set `BROKER=webull` in `.env` — routes all orders, data, and options chain through the Webull Developer API
 - **yfinance**: universal fallback for market data when the primary broker is unavailable
 
-### Notifications — Discord (6 message types)
-1. Trade Entry — full signal details, TP/SL levels, AI confidence
+### Notifications — Discord
+Delivered either via a **gateway bot** (recommended — enables slash commands) or
+a **webhook** (fallback). Message types:
+1. Trade Entry — signal details, TP/SL levels, AI confidence (`🧪 SEED` prefix for virtual seed trades)
 2. Trade Exit — PnL, exit reason, hold time
 3. Daily Report (4:15 PM ET) — trades, PnL, portfolio value, 30-day win rate
-4. Weekly Learning Update (Sunday 8 PM ET) — parameter changes, model accuracy
-5. Daily Loss Limit Hit — immediate alert when daily loss limit is reached
+4. Weekly Learning Update (Sunday 8 PM ET) — parameter changes, model accuracy, near-miss stats
+5. Daily Loss Limit Hit — immediate alert when the daily loss limit is reached
 6. System Alerts — bot online, data errors, 100-trade milestone
+7. Near-Miss — per-condition ✅/❌ breakdown (with the *reason* for each) when a
+   setup reaches the alert threshold but doesn't fire
+
+### Interactive Discord Commands (gateway bot)
+Run these in the bot's channel (`#price-alert` by default):
+| Command | What it does |
+|---------|--------------|
+| `/analysis` | Fresh SMC analysis of the whole watchlist (recomputed live, not cached) |
+| `/analysis ticker:META` | Analyse any ticker — even one not on the watchlist |
+| `/add ticker:META` | Add a ticker to the watchlist (validated + persisted) |
+| `/remove ticker:META` | Remove a ticker from the watchlist |
+| `/config value:9` | Set the global near-miss alert threshold (conditions met, 1–12) |
+| `/config value:10 ticker:META` | Set a per-ticker alert-threshold override |
+| `/show` | Show each watchlist ticker's effective alert threshold |
+
+### Companion: Day-Trade Alerts Bot (`daytrader/`)
+A separate, self-contained **alerts-only** bot (never places orders) that posts
+intraday level/zone alerts to a **`#day-trade`** channel. It shares the repo,
+`.env`, and venv but has its own database and runs as its own process. See the
+[Day-Trade Alerts Bot](#day-trade-alerts-bot-daytrader) section below.
+
+### Data accuracy
+Analysis uses Alpaca's **SIP** consolidated feed (full-volume, 15-min-delayed on
+the free tier via `ALPACA_FEED`), split/dividend-**adjusted** bars, session-aligned
+09:30 RTH candles, and evaluates on **completed bars only**. The VIX gate fails
+**closed** (a data outage halts trading rather than enabling it).
 
 ---
 
@@ -87,11 +115,21 @@ Only required if you set `BROKER=webull`.
 
 ---
 
-## Step 3 — Discord Webhook
+## Step 3 — Discord
 
-1. Open your Discord server settings → **Integrations** → **Webhooks**.
-2. Click **New Webhook**, name it (e.g., `SnipeBot`), choose a channel.
-3. Click **Copy Webhook URL**.
+SnipeBot supports two delivery methods (auto-detected). **Option A is recommended**
+because it enables the interactive slash commands (`/analysis`, `/add`, …).
+
+**Option A — Gateway bot (recommended):**
+1. [discord.com/developers/applications](https://discord.com/developers/applications) → **New Application** → **Bot** → **Reset Token** → copy the **bot token** → `DISCORD_BOT_TOKEN`.
+2. Invite the bot to your server with **Send Messages** + **Use Slash Commands** in the target channel.
+3. Set `DISCORD_CHANNEL_NAME=price-alert` (the channel it posts in, without `#`).
+4. *(Optional)* To use the plain-text `show analysis` trigger, enable **MESSAGE CONTENT INTENT** in the Bot page and set `DISCORD_ENABLE_TEXT_COMMAND=true`. The `/analysis` slash command works without this.
+
+**Option B — Webhook (fallback, no commands):**
+1. Server settings → **Integrations** → **Webhooks** → **New Webhook** → choose a channel → **Copy Webhook URL** → `DISCORD_WEBHOOK_URL`.
+
+> If the gateway bot is configured it takes precedence; the webhook is used only when the bot isn't connected.
 
 ---
 
@@ -215,6 +253,13 @@ docker logs -f snipebot
 ## Step 8 — Deploy to Fly.io (~$5/month)
 
 Fly.io runs SnipeBot as a persistent background worker with a mounted volume for the SQLite database and logs.
+
+> The committed `fly.toml` declares **two processes** (`snipebot` + `daytrader`),
+> so a deploy starts **two machines**. The steps below cover the `snipebot`
+> process; for the second `daytrader` machine (its own `daytrader_data` volume +
+> the `#day-trade` webhook) see [Day-Trade Alerts Bot](#day-trade-alerts-bot-daytrader).
+> If you only want SnipeBot for now, you can remove the `daytrader` entry from
+> `[processes]` and the `daytrader_data` mount.
 
 ### 8a — Install Fly CLI
 
@@ -402,36 +447,101 @@ doppler run -- python main.py
 
 ```
 snipebot/
-├── main.py                  # APScheduler — all 5 jobs wired here
-├── config.yaml              # Strategy and trading parameters
+├── main.py                  # SnipeBot entrypoint — APScheduler jobs + gateway bot
+├── config.yaml              # Strategy, trading, and ML parameters
 ├── requirements.txt         # Python dependencies
 ├── .env.template            # Secrets template (copy to .env)
 ├── Dockerfile               # Multi-stage Docker build
-├── fly.toml                 # Fly.io deployment config
+├── fly.toml                 # Fly.io config (2 processes: snipebot + daytrader)
 ├── .dockerignore            # Excludes .env, venv, logs, DB
 ├── core/
-│   ├── indicators.py        # Full SMC engine (swing points, OBs, Fibonacci, RVOL, ATR)
-│   ├── strategy.py          # 12-condition entry gate + signal builder
-│   ├── scanner.py           # 30-minute scan loop
+│   ├── indicators.py        # SMC engine (swings, OBs w/ as_of, Fibonacci, RVOL, ATR)
+│   ├── strategy.py          # 12-condition entry gate + per-condition reasons
+│   ├── scanner.py           # 30-min scan, seed trades, on-demand /analysis
 │   ├── risk_manager.py      # Position sizing, daily loss gate, trailing stop
 │   └── order_executor.py    # Alpaca + Webull order routing
 ├── data/
-│   ├── database.py          # SQLite CRUD (trades, strategy params, daily performance)
-│   ├── market_data.py       # OHLCV, options chain, VIX, earnings; multi-broker routing
+│   ├── database.py          # SQLite CRUD (trades, watchlist, thresholds, candidates)
+│   ├── market_data.py       # SIP OHLCV, options chain, VIX; multi-broker routing
+│   ├── bars.py              # Session-aligned RTH resampler (one bar factory)
 │   └── webull_client.py     # Webull OAuth2 REST client
 ├── ml/
 │   ├── confidence_model.py  # RandomForest confidence scorer
 │   ├── feature_engineer.py  # 9-feature SMC vector builder
 │   └── learner.py           # Sunday self-learning loop
 ├── notifications/
-│   └── discord_bot.py       # 6 Discord message templates
+│   ├── discord_bot.py       # Message templates + delivery (bot or webhook)
+│   └── discord_client.py    # Persistent gateway bot + slash commands
 ├── reports/
-│   └── daily_report.py      # 4:15 PM ET daily report
+│   ├── daily_report.py      # 4:15 PM ET daily report
+│   └── analysis_snapshot.py # /analysis report formatter
+├── daytrader/               # Companion day-trade ALERTS bot (never places orders)
+│   ├── main.py              # Its own scheduler loop (python -m daytrader.main)
+│   ├── config.yaml          # Day-trade tickers, levels, calibration config
+│   ├── levels_engine.py     # Zones, reference levels, ATR/RVOL
+│   ├── scorer.py            # Per-touch confidence model
+│   ├── calibrate.py         # Nightly quantiles + triple-barrier labels
+│   ├── backtest.py          # Walk-forward validation / calibration seeding
+│   ├── alerts.py            # #day-trade webhook sender
+│   ├── analyst.py           # Weekly Claude analyst (optional)
+│   └── store.py             # daytrader.db persistence
+├── tests/
+│   └── test_fixes.py        # Data-accuracy regression tests
 ├── launchd/
 │   └── com.snipebot.plist   # macOS launchd config
 └── models/
     └── confidence_model.pkl # Persisted RandomForest (auto-generated)
 ```
+
+---
+
+## Day-Trade Alerts Bot (`daytrader/`)
+
+A **separate, self-contained** bot that posts intraday level/zone alerts to a
+`#day-trade` channel. It is **alerts-only and never places orders** (PDT rules
+apply at small account sizes). It shares the repo, `.env`, and venv, but has
+**zero code coupling** to SnipeBot's `core/`/`data/`, its own database
+(`daytrader.db`), and runs as its **own process**.
+
+### How it fits together
+- **One Fly app, two processes → two machines** from a single image/deploy:
+  `snipebot` (`python main.py`) and `daytrader` (`python -m daytrader.main`).
+- Each machine mounts **its own** volume at `/data` (`snipebot_data` /
+  `daytrader_data`) — Fly volumes can't be shared across machines.
+- Discord: SnipeBot uses its gateway bot in `#price-alert`; daytrader uses a
+  plain **webhook** in `#day-trade` (no separate Discord app needed).
+
+### Setup (Fly dashboard — no CLI required)
+1. **Discord webhook:** create channel `#day-trade` → Edit Channel → Integrations
+   → Webhooks → New Webhook → copy URL → set secret `DISCORD_DAYTRADE_WEBHOOK_URL`.
+2. **Volume:** Fly dashboard → Volumes → Create `daytrader_data` (region `ord`, 1 GB).
+3. **Secrets** (Fly dashboard → Secrets): `DISCORD_DAYTRADE_WEBHOOK_URL`, and
+   optionally `ANTHROPIC_API_KEY` (weekly analyst only — the bot runs without it).
+4. **Deploy** `main` as usual. Fly starts both machines; confirm **two** machines
+   in the dashboard's Machines view.
+
+### Seeding calibration (run the backtest without a terminal)
+Set the secret `DAYTRADER_BACKTEST_ON_START=1` (optionally
+`DAYTRADER_BACKTEST_START` / `DAYTRADER_BACKTEST_END`), then deploy. On boot the
+daytrader machine runs the walk-forward backtest once, **posts the per-level
+report to `#day-trade`**, commits calibration to `daytrader.db`, and continues
+into the live loop. **Review the report** — level types with n ≥ 20 and
+win% > ~52% carry edge; near coin-flip means keep collecting. Then **delete the
+`DAYTRADER_BACKTEST_ON_START` secret** so it doesn't re-run every deploy (the
+nightly job keeps calibration fresh thereafter).
+
+Locally you can instead run:
+```bash
+python -m daytrader.backtest --start 2025-01-02 --end 2026-06-30 --commit
+python -m daytrader.main
+```
+
+### Weekly cadence
+Sun 19:00 ET scorer retrain → 19:30 ET optional Claude analyst posts a Weekly
+Analyst Review to `#day-trade`. It never auto-merges or auto-deploys; any config
+proposal is posted for you to review. (PR mode needs the `gh` CLI on the host,
+which a Fly container lacks — set `analyst.enable_pr: false` in
+`daytrader/config.yaml`, which posts a diff to Discord instead.)
 
 ---
 
