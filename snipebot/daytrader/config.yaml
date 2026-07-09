@@ -1,6 +1,6 @@
 # daytrader/config.yaml — Day-Trade Alerts Bot (alerts & analysis ONLY — never places orders)
 
-tickers: [GOOGL, TSLA, SPY]
+tickers: [SPY]
 timezone: US/Eastern
 
 data:
@@ -33,7 +33,7 @@ calibration:
 
 scorer:
   cold_start_events: 50        # rule-based score until this many labeled events exist
-  min_confidence_alert: 0.55   # suppress zone-entry alerts below this probability
+  min_confidence_alert: 0.65   # suppress zone-entry alerts below this probability (raised: fewer, higher-conviction alerts)
   model_path: models/daytrader_scorer.pkl
 
 alerts:

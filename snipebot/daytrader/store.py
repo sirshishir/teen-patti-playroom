@@ -122,11 +122,16 @@ def count_labeled() -> int:
     return int(n)
 
 
-def events_for_session(session_date: str) -> List[Dict]:
+def events_for_session(session_date: str,
+                       ticker: Optional[str] = None) -> List[Dict]:
+    q = "SELECT * FROM zone_events WHERE session_date=?"
+    params: List[Any] = [session_date]
+    if ticker:
+        q += " AND ticker=?"
+        params.append(ticker)
+    q += " ORDER BY touch_time ASC"
     with _conn() as c:
-        return [dict(r) for r in c.execute(
-            "SELECT * FROM zone_events WHERE session_date=?", (session_date,)
-        ).fetchall()]
+        return [dict(r) for r in c.execute(q, params).fetchall()]
 
 
 # ── calibration ───────────────────────────────────────────────────────────────

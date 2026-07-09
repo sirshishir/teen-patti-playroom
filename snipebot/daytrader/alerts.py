@@ -115,21 +115,33 @@ def send_new_zone(ticker: str, table_str: str, reason: str) -> None:
           f"```\n{table_str}\n```", _COLOR["info"])
 
 
-def send_recap(ticker: str, events: List[Dict]) -> None:
+def send_recap(ticker: str, events: List[Dict],
+               min_conf: float = 0.0) -> None:
     if not _once(ticker, "recap"):
         return
     if not events:
         _post(f"🌇 {ticker} recap — {session_date_str()}",
               "No zone touches today.", _COLOR["recap"])
         return
+    # Show only the actionable (alerted) setups; the rest are recorded silently
+    # as training data (every touch is a sample) but would just be noise here.
+    alerted = [e for e in events if (e.get("confidence") or 0.0) >= min_conf]
+    if not alerted:
+        _post(f"🌇 {ticker} recap — {session_date_str()}",
+              f"{len(events)} zone touches observed, none above the "
+              f"{min_conf:.0%} alert threshold — nothing actionable today.",
+              _COLOR["recap"])
+        return
     lines = []
-    for e in events:
+    for e in alerted:
         out = e.get("outcome") or "pending"
         lines.append(f"• {e['level_type']} {e['direction']} @ "
                      f"${e['touch_price']:,.2f} → **{out}** "
                      f"(conf {e['confidence']:.0%})")
+    body = (f"**{len(alerted)}** actionable setup(s) of {len(events)} observed:\n"
+            + "\n".join(lines))
     _post(f"🌇 {ticker} recap — {session_date_str()}",
-          "\n".join(lines)[:3900], _COLOR["recap"])
+          body[:3900], _COLOR["recap"])
 
 
 def send_system(msg: str) -> None:

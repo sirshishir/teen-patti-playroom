@@ -305,16 +305,51 @@ def _fetch_yfinance_4h(ticker: str, lookback_days: int) -> pd.DataFrame:
 
 # ── VIX ───────────────────────────────────────────────────────────────────────
 
-def fetch_vix() -> Optional[float]:
-    try:
-        df = yf.download("^VIX", period="5d", interval="1d",
-                         auto_adjust=True, progress=False)
-        if df.empty:
-            return None
-        return float(df["Close"].iloc[-1])
-    except Exception as exc:
-        logger.error("Failed to fetch VIX: %s", exc)
+_vix_cache: Dict[str, Any] = {"value": None, "ts": None}
+_VIX_CACHE_MAX_AGE = timedelta(hours=6)
+
+
+def _extract_last_close(df) -> Optional[float]:
+    """Robustly pull the latest close, handling yfinance MultiIndex columns."""
+    if df is None or df.empty or "Close" not in df:
         return None
+    close = df["Close"]
+    # Recent yfinance returns MultiIndex columns → df["Close"] is a DataFrame.
+    if hasattr(close, "columns") or getattr(close, "ndim", 1) > 1:
+        close = close.iloc[:, 0]
+    val = float(close.iloc[-1])
+    return val if val == val else None   # guard against NaN
+
+
+def fetch_vix() -> Optional[float]:
+    """
+    Return the latest VIX close. Retries yfinance, and on failure falls back to
+    the last successfully-fetched value if it's < 6h old. Only returns None when
+    VIX has been unavailable long enough that the fail-closed gate should trip.
+    """
+    for attempt in range(1, 4):
+        try:
+            df = yf.download("^VIX", period="5d", interval="1d",
+                             auto_adjust=True, progress=False)
+            val = _extract_last_close(df)
+            if val is not None:
+                _vix_cache["value"] = val
+                _vix_cache["ts"] = datetime.now(timezone.utc)
+                return val
+        except Exception as exc:
+            logger.warning("VIX fetch attempt %d failed: %s", attempt, exc)
+        time.sleep(0.5 * attempt)
+
+    # Fallback: recent cached value keeps a transient outage from halting trading.
+    if _vix_cache["value"] is not None and _vix_cache["ts"] is not None:
+        age = datetime.now(timezone.utc) - _vix_cache["ts"]
+        if age <= _VIX_CACHE_MAX_AGE:
+            logger.warning("VIX fetch failed — using cached %.1f (age %s)",
+                           _vix_cache["value"], age)
+            return _vix_cache["value"]
+
+    logger.error("VIX unavailable and no fresh cache — gate will fail closed")
+    return None
 
 
 # ── Options Chain ─────────────────────────────────────────────────────────────
