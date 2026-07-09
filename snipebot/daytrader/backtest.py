@@ -17,7 +17,7 @@ import argparse
 import logging
 from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -28,8 +28,9 @@ from daytrader.calibrate import (measure_overshoots, rolling_quantiles,
                                  triple_barrier)
 from daytrader.data_feed import (get_day_frame_sip, premarket_slice,
                                  prior_day_hlc, rth_slice)
-from daytrader.levels_engine import (build_zones, compute_atr,
+from daytrader.levels_engine import (build_zones, compute_atr, compute_rvol,
                                      reference_levels, resample_5m)
+from daytrader.scorer import heuristic_score
 from daytrader.settings import CONFIG, ET
 
 logging.basicConfig(level=logging.WARNING)
@@ -51,7 +52,11 @@ def trading_sessions(start: str, end: str) -> List[str]:
     return sorted(df.index.tz_convert(ET).strftime("%Y-%m-%d").unique())
 
 
-def run(start: str, end: str, tickers: List[str], commit: bool) -> None:
+def run(start: str, end: str, tickers: List[str], commit: bool,
+        min_conf: Optional[float] = None, equity_start: float = 1000.0,
+        risk_frac: float = 0.01, cost_r: float = 0.05) -> str:
+    if min_conf is None:
+        min_conf = float(CONFIG["scorer"]["min_confidence_alert"])
     sessions = trading_sessions(start, end)
     print(f"Backtesting {len(sessions)} sessions × {tickers}")
 
@@ -121,11 +126,43 @@ def run(start: str, end: str, tickers: List[str], commit: bool) -> None:
                         if not long_ and oc in ("win", "loss"):
                             oc = "win" if oc == "loss" else "loss"
                         risk = abs(price - z.stop) or 1e-9
+
+                        # Point-in-time alert confidence — heuristic in cold-start,
+                        # exactly as the live bot would have scored this touch.
+                        q50 = (calib.get(z.level_type) or {}).get("q50") \
+                            or _C["default_q50"]
+                        tail = sub.iloc[-10:]
+                        if long_:
+                            depth = max(0.0, (z.level - float(tail["low"].min())) / z.level) \
+                                if not tail.empty else 0.0
+                        else:
+                            depth = max(0.0, (float(tail["high"].max()) - z.level) / z.level) \
+                                if not tail.empty else 0.0
+                        vwap = refs.get("VWAP")
+                        ev = {
+                            "level_type": z.level_type, "direction": side,
+                            "sweep_depth": depth, "rvol": compute_rvol(sub),
+                            "session_minute": i,
+                            "vwap_dist_atr": (price - vwap) / atr if vwap and atr else 0.0,
+                            "confluence": z.confluence, "respect_prior": z.respect_rate,
+                        }
+                        conf = heuristic_score(ev, float(q50))
+
+                        # Realized R exiting at target1 (win), stop (loss), or
+                        # scratch on timeout — the honest fill, not max excursion.
+                        if oc == "win":
+                            realized_r = abs(z.target1 - price) / risk
+                        elif oc == "loss":
+                            realized_r = -1.0
+                        else:
+                            realized_r = 0.0
+
                         results.append({
                             "ticker": ticker, "date": sd, "lt": z.level_type,
                             "dir": side, "outcome": oc,
                             "r": (mfe / risk) if oc == "win"
                                  else (-1.0 if oc == "loss" else mfe / risk - mae / risk),
+                            "conf": conf, "realized_r": realized_r,
                         })
                         outcomes[(ticker, z.level_type)].append(oc)
                 prev_price = price
@@ -144,7 +181,7 @@ def run(start: str, end: str, tickers: List[str], commit: bool) -> None:
         if (si + 1) % 20 == 0:
             print(f"  … {si + 1}/{len(sessions)} sessions")
 
-    report = _report(results)
+    report = _report(results, min_conf, equity_start, risk_frac, cost_r)
     if commit:
         _commit_calibration(tickers, samples, outcomes)
         report += "\nCalibration committed to daytrader.db — live bot is seeded."
@@ -152,27 +189,73 @@ def run(start: str, end: str, tickers: List[str], commit: bool) -> None:
     return report
 
 
-def _report(results: List[Dict]) -> str:
-    """Build the per-level report string (also prints it for CLI use)."""
+def _report(results: List[Dict], min_conf: float = 0.65,
+            equity_start: float = 1000.0, risk_frac: float = 0.01,
+            cost_r: float = 0.05) -> str:
+    """
+    Build the analysis report: per-level touches, ALERTED-only success rate
+    (with a 95% CI), R expectancy net of costs, and a $-equity simulation.
+    """
+    import math
     if not results:
         msg = "No zone touches generated — widen dates or check data access."
         print(msg)
         return msg
     df = pd.DataFrame(results)
-    lines = [f"{'=' * 62}", f"TOTAL touches: {len(df)}"]
+    L = [f"{'=' * 66}", f"ALL ZONE TOUCHES: {len(df)}"]
+
+    # ── Per-level (all touches, for context) ──
     for (tk, lt), g in df.groupby(["ticker", "lt"]):
-        n = len(g)
-        wins = (g["outcome"] == "win").sum()
-        losses = (g["outcome"] == "loss").sum()
-        to = (g["outcome"] == "timeout").sum()
-        wr = wins / (wins + losses) if wins + losses else 0
-        lines.append(f"{tk:6s} {lt:9s} n={n:4d} win%={wr:5.1%} "
-                     f"timeout={to:3d} avgR={g['r'].mean():+.2f} "
-                     f"expectancy/R={g['r'].mean():+.3f}")
-    lines.append(f"{'=' * 62}")
-    lines.append("Read: win% is the calibrated-zone respect rate; expectancy is "
-                 "per-touch in R. Level types with n<20 are noise — keep collecting.")
-    report = "\n".join(lines)
+        wins = int((g["outcome"] == "win").sum())
+        losses = int((g["outcome"] == "loss").sum())
+        to = int((g["outcome"] == "timeout").sum())
+        wr = wins / (wins + losses) if (wins + losses) else 0.0
+        L.append(f"{tk:6s} {lt:9s} n={len(g):4d} win%={wr:5.1%} "
+                 f"timeout={to:3d} avgR={g['r'].mean():+.2f}")
+
+    # ── ALERTED only (what the live bot would actually have fired) ──
+    a = df[df["conf"] >= min_conf].copy()
+    L.append("=" * 66)
+    L.append(f"ALERTED SETUPS (confidence ≥ {min_conf:.0%}): "
+             f"{len(a)} of {len(df)} touches")
+    if len(a):
+        wins = int((a["outcome"] == "win").sum())
+        losses = int((a["outcome"] == "loss").sum())
+        to = int((a["outcome"] == "timeout").sum())
+        decided = wins + losses
+        wr = wins / decided if decided else 0.0
+        ci = 1.96 * math.sqrt(wr * (1 - wr) / decided) if decided else 0.0
+        exp_r = float(a["realized_r"].mean())
+        L.append(f"  wins={wins}  losses={losses}  timeouts={to}")
+        L.append(f"  SUCCESS RATE = {wr:.1%}  (95% CI ±{ci * 100:.1f} pp, "
+                 f"n_decided={decided})")
+        L.append(f"  avg R/trade  = {exp_r:+.2f}R   net of {cost_r:.2f}R cost "
+                 f"= {exp_r - cost_r:+.2f}R")
+
+        # ── $-equity simulation (chronological, compounding, net of costs) ──
+        a_sorted = a.sort_values("date")
+        equity, peak, maxdd = equity_start, equity_start, 0.0
+        for r in a_sorted["realized_r"]:
+            equity += risk_frac * equity * (float(r) - cost_r)
+            peak = max(peak, equity)
+            if peak > 0:
+                maxdd = max(maxdd, (peak - equity) / peak)
+        ret = (equity / equity_start - 1) * 100
+        L.append("-" * 66)
+        L.append(f"EQUITY SIM: ${equity_start:,.0f} → ${equity:,.0f} "
+                 f"({ret:+.1f}%) over {len(a)} alerted trades")
+        L.append(f"  sizing: risk {risk_frac:.1%} of equity/trade, compounding; "
+                 f"max drawdown {maxdd * 100:.1f}%")
+    else:
+        L.append("  Nothing cleared the alert threshold — no trades would fire.")
+
+    # ── Honesty guardrails (validation.md) ──
+    L.append("=" * 66)
+    L.append("CAVEATS: in-sample walk-forward (one path, not a held-out period); "
+             "small n → wide CI (need ~385 decided trades for 55% to separate "
+             "from a coin); assumes fills AT the zone with only the stated cost "
+             "model; timeouts counted as 0R. A sanity check, not a promise.")
+    report = "\n".join(L)
     print(report)
     return report
 
@@ -198,5 +281,15 @@ if __name__ == "__main__":
     ap.add_argument("--tickers", nargs="*", default=CONFIG["tickers"])
     ap.add_argument("--commit", action="store_true",
                     help="seed daytrader.db with the resulting calibration")
+    ap.add_argument("--min-conf", type=float, default=None,
+                    help="alert confidence threshold (default: config value)")
+    ap.add_argument("--equity", type=float, default=1000.0,
+                    help="starting equity for the $-simulation")
+    ap.add_argument("--risk-frac", type=float, default=0.01,
+                    help="fraction of equity risked per alerted trade")
+    ap.add_argument("--cost-r", type=float, default=0.05,
+                    help="round-trip cost per trade in R units")
     args = ap.parse_args()
-    run(args.start, args.end, [t.upper() for t in args.tickers], args.commit)
+    run(args.start, args.end, [t.upper() for t in args.tickers], args.commit,
+        min_conf=args.min_conf, equity_start=args.equity,
+        risk_frac=args.risk_frac, cost_r=args.cost_r)
