@@ -212,8 +212,11 @@ def tick() -> None:
 # ── EOD / nightly / weekly ────────────────────────────────────────────────────
 
 def recap() -> None:
+    min_conf = float(CONFIG["scorer"]["min_confidence_alert"])
     for ticker in TICKERS:
-        alerts.send_recap(ticker, store.events_for_session(session_date_str()))
+        # Filter by ticker (each recap was previously showing ALL tickers' events).
+        events = store.events_for_session(session_date_str(), ticker=ticker)
+        alerts.send_recap(ticker, events, min_conf)
 
 
 def nightly() -> None:
